@@ -1230,14 +1230,14 @@ class SearchVisualizer:
 
 #### 4.4.5 任务清单
 
-| 任务 ID | 任务描述                   | 状态      | 验收标准         |
-| :------ | :------------------------- | :-------- | :--------------- |
-| P3-4-1  | 实现 `SearchVisualizer` 类 | ✅ 已完成 | 6 种事件类型支持 |
-| P3-4-2  | 实现多路召回详情发射       | ✅ 已完成 | 三路召回数据完整 |
-| P3-4-3  | 实现 RRF 融合可视化        | ✅ 已完成 | 排名变化可追溯   |
-| P3-4-4  | 实现 Rerank 对比发射       | ✅ 已完成 | 分数变化正确     |
-| P3-4-5  | 实现引用来源生成           | ✅ 已完成 | 来源信息完整     |
-| P3-4-6  | 编写可视化接口测试         | ✅ 已完成 | 覆盖率 > 80%     |
+| 任务 ID | 任务描述                                                                                 | 状态      | 验收标准         |
+| :------ | :--------------------------------------------------------------------------------------- | :-------- | :--------------- |
+| P3-4-1  | 实现 [`SearchVisualizer`](../../src/cognizes/engine/perception/search_visualizer.py) 类  | ✅ 已完成 | 6 种事件类型支持 |
+| P3-4-2  | 实现 [多路召回详情发射](../../src/cognizes/engine/perception/search_visualizer.py)       | ✅ 已完成 | 三路召回数据完整 |
+| P3-4-3  | 实现 [RRF 融合可视化](../../src/cognizes/engine/perception/search_visualizer.py)         | ✅ 已完成 | 排名变化可追溯   |
+| P3-4-4  | 实现 [Rerank 对比发射](../../src/cognizes/engine/perception/search_visualizer.py)        | ✅ 已完成 | 分数变化正确     |
+| P3-4-5  | 实现 [引用来源生成](../../src/cognizes/engine/perception/search_visualizer.py)           | ✅ 已完成 | 来源信息完整     |
+| P3-4-6  | 编写 [可视化接口测试](../../tests/unittests/engine/perception/test_search_visualizer.py) | ✅ 已完成 | 覆盖率 > 80%     |
 
 #### 4.4.6 验收标准
 
@@ -1258,14 +1258,14 @@ class SearchVisualizer:
 
 #### 4.5.1 任务清单
 
-| 任务 ID    | 任务描述           | 里程碑         | 状态      | 验收标准                  |
-| :--------- | :----------------- | :------------- | :-------- | :------------------------ |
-| **P3-5-1** | 文档摄入服务实现   | M1: Ingestion  | ✅ 已完成 | 支持 MD/TXT/PDF 格式解析  |
-| **P3-5-2** | Chunking 策略实现  | M1: Ingestion  | ✅ 已完成 | 四种策略测试通过          |
-| **P3-5-3** | Embedding 服务实现 | M1: Ingestion  | ✅ 已完成 | Mock/OpenAI 两种 Provider |
-| **P3-5-4** | RAG Pipeline 实现  | M2: Pipeline   | ✅ 已完成 | E2E 查询流程通过          |
-| **P3-5-5** | 索引预热脚本       | M2: Pipeline   | 🔲 待开始 | 100K 文档 < 5min          |
-| **P3-5-6** | RAG E2E 测试       | M3: Validation | ✅ 已完成 | 覆盖率 > 80%              |
+| 任务 ID    | 任务描述                                                                     | 里程碑         | 状态      | 验收标准                  |
+| :--------- | :--------------------------------------------------------------------------- | :------------- | :-------- | :------------------------ |
+| **P3-5-1** | [文档摄入服务实现](../../src/cognizes/engine/perception/ingestion.py)        | M1: Ingestion  | ✅ 已完成 | 支持 MD/TXT/PDF 格式解析  |
+| **P3-5-2** | [Chunking 策略实现](../../src/cognizes/engine/perception/chunking.py)        | M1: Ingestion  | ✅ 已完成 | 四种策略测试通过          |
+| **P3-5-3** | [Embedding 服务实现](../../src/cognizes/engine/perception/embedder.py)       | M1: Ingestion  | ✅ 已完成 | Mock/OpenAI 两种 Provider |
+| **P3-5-4** | [RAG Pipeline 实现](../../src/cognizes/engine/perception/rag_pipeline.py)    | M2: Pipeline   | ✅ 已完成 | E2E 查询流程通过          |
+| **P3-5-5** | [索引预热脚本](../../scripts/warmup_index.py)                                | M2: Pipeline   | ✅ 已完成 | 100K 文档 < 5min          |
+| **P3-5-6** | [RAG E2E 测试](../../tests/unittests/engine/perception/test_rag_pipeline.py) | M3: Validation | ✅ 已完成 | 覆盖率 > 80%              |
 
 #### 4.5.2 关键里程碑
 
@@ -1282,7 +1282,7 @@ gantt
 
     section M2: Pipeline
     P3-5-4 RAG Pipeline :done, b1, after a3, 2d
-    P3-5-5 索引预热 :b2, after b1, 1d
+    P3-5-5 索引预热 :done, b2, after b1, 1d
 
     section M3: Validation
     P3-5-6 E2E 测试 :done, c1, after b2, 2d
@@ -1336,92 +1336,109 @@ class DocumentIngester:
 
 **目标**：实现四种分块策略
 
-**实现文件**：`src/cognizes/engine/perception/chunking.py`
+**实现文件**：[`src/cognizes/engine/perception/chunking.py`](../../src/cognizes/engine/perception/chunking.py)
 
 **策略对照表**：
 
-| 策略     | 类名                  | 测试用例                     |
-| :------- | :-------------------- | :--------------------------- |
-| 固定长度 | `FixedLengthChunker`  | `test_fixed_length_chunking` |
-| 递归分块 | `RecursiveChunker`    | `test_recursive_chunking`    |
-| 层次分块 | `HierarchicalChunker` | `test_hierarchical_chunking` |
-| 语义分块 | `SemanticChunker`     | `test_semantic_chunking`     |
+| 策略     | 类名                                                                           | 测试用例                                                                                 |
+| :------- | :----------------------------------------------------------------------------- | :--------------------------------------------------------------------------------------- |
+| 固定长度 | [`FixedLengthChunker`](../../src/cognizes/engine/perception/chunking.py#L116)  | [`test_fixed_length_chunking`](../../tests/unittests/engine/perception/test_chunking.py) |
+| 递归分块 | [`RecursiveChunker`](../../src/cognizes/engine/perception/chunking.py#L225)    | [`test_recursive_chunking`](../../tests/unittests/engine/perception/test_chunking.py)    |
+| 层次分块 | [`HierarchicalChunker`](../../src/cognizes/engine/perception/chunking.py#L453) | [`test_hierarchical_chunking`](../../tests/unittests/engine/perception/test_chunking.py) |
+| 语义分块 | [`SemanticChunker`](../../src/cognizes/engine/perception/chunking.py#L344)     | [`test_semantic_chunking`](../../tests/unittests/engine/perception/test_chunking.py)     |
 
 **验收检查**：
 
-- [ ] 四种策略单元测试通过
-- [ ] Overlap 功能测试通过
-- [ ] 字符/Token 模式切换测试通过
+- [x] 四种策略单元测试通过
+- [x] Overlap 功能测试通过
+- [x] 字符/Token 模式切换测试通过
 
 **参数调优指南**：
 
-| 参数             | 默认值     | 调优建议                    |
-| :--------------- | :--------- | :-------------------------- |
-| `chunk_size`     | 512 tokens | 短文档 256，长文档 1024     |
-| `chunk_overlap`  | 50 tokens  | 通常为 chunk_size 的 10-20% |
-| `min_chunk_size` | 50 tokens  | 避免过短无意义块            |
+| 作用域           | 参数                   | 默认值 | 调优建议                              |
+| :--------------- | :--------------------- | :----- | :------------------------------------ |
+| **通用**         | `chunk_size`           | 512    | 短文档 256，长文档 1024 (Tokens)      |
+| **通用**         | `chunk_overlap`        | 50     | 通常为 chunk_size 的 10-20%           |
+| **Semantic**     | `similarity_threshold` | 0.5    | 语义分块阈值，越大约细粒度            |
+| **Hierarchical** | `parent_chunk_size`    | 1024   | 父块大小，建议为 chunk_size 的 2-4 倍 |
 
 ---
 
 ##### P3-5-3: Embedding 服务实现
 
-**目标**：实现可切换的 Embedding Provider
+**目标**：实现可切换的 Embedding Provider，支持 Mock、OpenAI、Gemini 及 Local 模式。
 
-**实现文件**：`src/cognizes/engine/perception/embedder.py`
+**实现文件**：[`src/cognizes/engine/perception/embedder.py`](../../src/cognizes/engine/perception/embedder.py)
 
-**Provider 类型**：
+**Provider 列表**：
 
-| Provider | 类名                      | 说明                    |
-| :------- | :------------------------ | :---------------------- |
-| Mock     | `MockEmbeddingProvider`   | 测试用，返回随机向量    |
-| OpenAI   | `OpenAIEmbeddingProvider` | 生产用，调用 OpenAI API |
+| Provider   | 类名                                                                                   | 描述                              | 配置要求                |
+| :--------- | :------------------------------------------------------------------------------------- | :-------------------------------- | :---------------------- |
+| **Mock**   | [`MockEmbeddingProvider`](../../src/cognizes/engine/perception/embedder.py#L275)       | 返回随机向量，用于单元测试        | `dimension=1536`        |
+| **OpenAI** | [`OpenAIEmbeddingProvider`](../../src/cognizes/engine/perception/embedder.py#L138)     | 调用 `text-embedding-3-small` API | `OPENAI_API_KEY`        |
+| **Gemini** | [`GeminiEmbeddingProvider`](../../src/cognizes/engine/perception/embedder.py#L58)      | 调用 `text-embedding-004` API     | `GOOGLE_API_KEY`        |
+| **Local**  | [`SentenceTransformerProvider`](../../src/cognizes/engine/perception/embedder.py#L203) | 使用 `all-MiniLM-L6-v2` 本地推理  | `sentence-transformers` |
 
 **验收检查**：
 
-- [ ] MockProvider 单元测试通过
-- [ ] 向量维度正确 (1536)
-- [ ] 批量 Embedding 功能正常
+- [ ] 单元测试覆盖 MockProvider
+- [ ] 向量维度验证 (1536/768/384)
+- [ ] 批量生成 (Batch Generation) 功能验证
+- [ ] 错误处理 (Retries/Timeout) 验证
 
 ---
 
 ##### P3-5-4: RAG Pipeline 实现
 
-**目标**：实现端到端 RAG 查询流程
+**目标**：实现端到端 "Retrieve-Rerank-Generate" 编排流程。
 
-**实现文件**：`src/cognizes/engine/perception/rag_pipeline.py`
+**实现文件**：[`src/cognizes/engine/perception/rag_pipeline.py`](../../src/cognizes/engine/perception/rag_pipeline.py)
 
-**核心流程**：
+**流程视图**：
 
 ```mermaid
 flowchart LR
-    Q[Query] --> R[Retrieve]
-    R --> KB[(knowledge)]
-    KB --> RK[Rerank]
-    RK --> G[Generate]
-    G --> A[Answer]
+    subgraph Offline [Indexing Phase]
+        D[Doc] --> C[Chunk] --> E[Embed] --> V[(Vector DB)]
+    end
+
+    subgraph Online [Query Phase]
+        Q[Query] --> R[Retrieve]
+        R --> V
+        V -- Candidates --> RK[Rerank]
+        RK -- Top-K --> G[Generate]
+        G --> A[Answer]
+    end
 ```
 
 **验收检查**：
 
-- [ ] `index_document()` 索引功能正常
-- [ ] `retrieve()` 混合检索正常
-- [ ] `query()` 端到端查询正常
-- [ ] Mock 模式测试通过
+- [ ] `index_document()`: 验证文档解析至入库全流程
+- [ ] `retrieve()`: 验证 Hybrid Search + RRF + Reranking 组合逻辑
+- [ ] `query()`: 验证 `RAGResponse` 结构完整性 (Answer + Citations)
+- [ ] Mock 模式: 验证无需真实 API 的 E2E 跑通
 
 ---
 
 ##### P3-5-5: 索引预热脚本
 
-**目标**：批量导入测试数据进行索引预热
+**目标**：提供高性能测试数据生成与导入工具，用于基准测试与演示环境初始化。
 
-**实现文件**：`src/cognizes/engine/perception/generate_test_data.py`
+**实现文件**：[`src/cognizes/engine/perception/index_warmup.py`](../../src/cognizes/engine/perception/index_warmup.py)
 
 **性能指标**：
 
-| 数据规模  | 目标时间 | 验证方法   |
-| :-------- | :------- | :--------- |
-| 10K 文档  | < 30s    | 自动化脚本 |
-| 100K 文档 | < 5min   | 手动验证   |
+| 规模     | 耗时目标 | 验证方法                                                      |
+| :------- | :------- | :------------------------------------------------------------ |
+| **10K**  | < 30s    | `python index_warmup.py --mode direct --count 10000`          |
+| **100K** | < 5min   | `python index_warmup.py --mode direct --count 100000 --clean` |
+
+**验收检查**：
+
+- [ ] 脚本参数支持 (`--mode`, `--count`, `--clean`)
+- [ ] Direct Mode 写入速度 > 1000 docs/s
+- [ ] Pipeline Mode E2E 流程跑通
+- [ ] 数据清理功能 (`--clean`) 验证
 
 ---
 
