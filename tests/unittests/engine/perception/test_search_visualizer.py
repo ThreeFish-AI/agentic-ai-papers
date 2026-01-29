@@ -169,3 +169,47 @@ class TestSearchVisualizer:
         mock_event_emitter.emit_custom.assert_called_once()
         call_args = mock_event_emitter.emit_custom.call_args
         assert call_args.kwargs["event_name"] == "rrf_result"
+
+    async def test_emit_rerank_comparison(self, mock_event_emitter):
+        """测试 Rerank 对比事件"""
+        visualizer = SearchVisualizer(event_emitter=mock_event_emitter)
+
+        comparisons = [
+            RerankComparison(
+                doc_id="doc1",
+                content_preview="preview",
+                l0_score=0.5,
+                l1_score=0.9,
+                rank_before=10,
+                rank_after=1,
+            )
+        ]
+
+        await visualizer.emit_rerank_comparison(run_id="run_001", comparisons=comparisons)
+
+        mock_event_emitter.emit_custom.assert_called_once()
+        call_args = mock_event_emitter.emit_custom.call_args
+        assert call_args.kwargs["event_name"] == "rerank_result"
+        assert len(call_args.kwargs["data"]["comparisons"]) == 1
+        assert call_args.kwargs["data"]["avgScoreImprovement"] == 0.4
+
+    async def test_emit_citations(self, mock_event_emitter):
+        """测试引用来源事件"""
+        visualizer = SearchVisualizer(event_emitter=mock_event_emitter)
+
+        citations = [
+            SourceCitation(
+                doc_id="doc1",
+                source_type="document",
+                title="Doc 1",
+                relevance_score=0.9,
+            )
+        ]
+
+        await visualizer.emit_citations(run_id="run_001", citations=citations)
+
+        mock_event_emitter.emit_custom.assert_called_once()
+        call_args = mock_event_emitter.emit_custom.call_args
+        assert call_args.kwargs["event_name"] == "source_citation"
+        assert len(call_args.kwargs["data"]["citations"]) == 1
+        assert call_args.kwargs["data"]["citations"][0]["id"] == "doc1"
