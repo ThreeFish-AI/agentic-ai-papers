@@ -644,7 +644,7 @@ LIMIT 10;
 
 > [!NOTE]
 >
-> **对标 Roadmap Pillar III**：RAG Pipeline 是 Knowledge Base 的核心检索链路，实现「文档摄入 → 检索 → 生成」的完整闭环。
+> **对标 Roadmap Pillar III**：RAG Pipeline 是 Knowledge Base 的核心检索链路，实现「文档摄入 → 索引构建 → 检索 → 生成」的完整闭环。
 
 #### 3.5.1 Pipeline 完整流程
 
@@ -679,7 +679,7 @@ flowchart LR
 
 **实现文件**：[src/cognizes/engine/perception/rag_pipeline.py](../../src/cognizes/engine/perception/rag_pipeline.py)
 
-`RAGPipeline` 类作为 Perception Layer 的统一入口，编排了检索与生成过程。
+`RAGPipeline` 类作为 Perception Layer 的统一入口，编排了索引构建与检索生成过程。
 
 ```python
 class RAGPipeline:
@@ -687,6 +687,20 @@ class RAGPipeline:
     Complete RAG Pipeline Orchestrator.
     """
 
+    # --- Offline Phase (Indexing) ---
+    async def index_document(
+        self,
+        content: str,
+        source_uri: str = "inline.txt",
+        corpus_id: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> IndexingResult:
+        """
+        Orchestrate Ingestion: Parse -> Chunk -> Embed -> Store
+        """
+        ...
+
+    # --- Online Phase (Retrieval) ---
     async def query(
         self,
         query: str,
@@ -705,9 +719,15 @@ class RAGPipeline:
         ...
 ```
 
-> [!NOTE]
+> [!IMPORTANT]
 >
-> 完整代码实现请参考 Phase 3 源码文件。目前的 Pipeline 实现通过 `hybrid_search/kb_hybrid_search` 支持基础的混合检索，`Reranker` 组件的深度集成将在后续迭代中增强。
+> **Architectural Pattern (Facade)**:
+>
+> `RAGPipeline` 充当 Perception Layer 的 **Orchestrator (编排器)**，对外通过统一接口屏蔽了底层子系统的复杂性，实现了 **离线构建** 与 **在线服务** 的闭环管理：
+>
+> 1. **Ingestion Proxy**: 代理 `DocumentIngester` 的能力，提供文档标准化的 "入口" (Offline)。
+> 2. **Retrieval Coordination**: 协调 "Recall (Hybrid)" -> "Refine (Rerank)" -> "Generate (LLM)" 的全链路数据流 (Online)。
+> 3. **Context Injection**: 负责将检索到的 `SourceCitation` 注入到 Prompt Context 中，确保生成的可信度。
 
 ---
 
@@ -720,16 +740,16 @@ class RAGPipeline:
 整个摄入过程采用 **管道-过滤器 (Pipes and Filters)** 架构，由 `DocumentIngester` 统一编排，分为解析、分块、增强、向量化四个正交阶段：
 
 ```mermaid
-flowchart TB
+flowchart LR
     subgraph Input["输入源 (Input)"]
         File[File/Stream]
     end
 
     subgraph Orchestrator["DocumentIngester (编排器)"]
-        direction TB
+        direction LR
 
         subgraph Parser["Strategy: Parsing"]
-            direction LR
+            direction TB
 
             MP[MarkdownParser]
             TP[TextParser]
@@ -739,7 +759,7 @@ flowchart TB
         end
 
         subgraph Transform["Transformation"]
-            direction LR
+            direction TB
 
             Doc[Document Object]
             Chunker[Chunking Strategy]
@@ -799,6 +819,10 @@ flowchart TB
 
 **实现文件**：[src/cognizes/engine/perception/chunking.py](../../src/cognizes/engine/perception/chunking.py)
 
+> [!IMPORTANT]
+>
+> **Systemic Integration**: Chunking 策略并非硬编码，而是存储于 `corpus` 表的 `config` 字段中 (见 [3.2.1](#321-corpus-表-语料库))。`DocumentIngester` 在运行时读取此配置，动态加载对应的 `ChunkingStrategy` 实例。
+
 #### 3.7.1 四种策略对比
 
 | 策略                    | 方法                 | 优点         | 缺点         | 适用场景  |
@@ -850,6 +874,10 @@ flowchart LR
 
 #### 3.8.2 Reranker 模型选型
 
+> [!TIP]
+>
+> **Configuration**: `CrossEncoderReranker` 支持通过 `model_name` 参数加载任意 HuggingFace `AutoModelForSequenceClassification` 兼容模型。
+
 | 模型                        | 特点          | 推荐场景 |
 | :-------------------------- | :------------ | :------- |
 | **BAAI/bge-reranker-base**  | 性能/效率平衡 | 通用场景 |
@@ -857,9 +885,13 @@ flowchart LR
 | **BCE-Reranker**            | 中英双语优秀  | 双语场景 |
 | **Cohere Rerank**           | 商业 API      | 快速集成 |
 
-#### 3.8.3 Lost in the Middle 优化
+#### 3.8.3 Lost in the Middle 优化 (Strategy)
 
-研究表明 LLM 对长上下文中间部分信息利用率较低。解决方案：
+> [!NOTE]
+>
+> **Future Work**: 以下重排序策略计划在后续版本中实现，用以优化 LLM 对长 Context 的注意力分布。
+
+研究表明 LLM 对长上下文中间部分信息利用率较低。规划中的解决方案：
 
 1. **Reverse Order**：按相关性升序排列（最相关在末尾）
 2. **Sandwich Pattern**：最相关的放在开头和结尾
