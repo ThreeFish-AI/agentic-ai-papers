@@ -504,7 +504,7 @@ JSONB 过滤能力正交分解为以下维度：
 
 > [!IMPORTANT]
 >
-> **Implementation Reference**: See `src/cognizes/engine/schema/perception_schema.sql` (Part 3) for the actual DDLs.
+> **Implementation Reference**: See [src/cognizes/engine/schema/perception_schema.sql](../../src/cognizes/engine/schema/perception_schema.sql) (Part 3) for the actual DDLs.
 
 ```sql
 -- 1. 通用 GIN 索引 (One Size Fits All): 支撑 80% 的包含/存在性查询
@@ -677,20 +677,43 @@ flowchart LR
 
 #### 3.5.2 RAG Pipeline 核心接口
 
-**实现文件**：`src/cognizes/engine/perception/rag_pipeline.py`
+**实现文件**：[src/cognizes/engine/perception/rag_pipeline.py](../../src/cognizes/engine/perception/rag_pipeline.py)
 
-#### 3.5.3 双存储解耦架构
+`RAGPipeline` 类作为 Perception Layer 的统一入口，编排了检索与生成过程。
 
-| 存储表      | 数据类型     | 过滤维度                | 检索函数             |
-| :---------- | :----------- | :---------------------- | :------------------- |
-| `knowledge` | 静态知识文档 | `corpus_id`, `app_name` | `kb_hybrid_search()` |
-| `memories`  | 用户会话记忆 | `user_id`, `app_name`   | `hybrid_search()`    |
+```python
+class RAGPipeline:
+    """
+    Complete RAG Pipeline Orchestrator.
+    """
+
+    async def query(
+        self,
+        query: str,
+        top_k: int = 5,
+        corpus_id: Optional[str] = None,
+        semantic_weight: float = 0.7,
+        keyword_weight: float = 0.3,
+        system_prompt: Optional[str] = None,
+    ) -> RAGResponse:
+        """
+        End-to-End RAG Execution:
+        1. Retrieve: 执行 Hybrid Search (Semantic + Keyword)
+        2. Rerank: (Optional) 执行 Cross-Encoder 精排
+        3. Generate: 调用 LLM 生成回答
+        """
+        ...
+```
+
+> [!NOTE]
+>
+> 完整代码实现请参考 Phase 3 源码文件。目前的 Pipeline 实现通过 `hybrid_search/kb_hybrid_search` 支持基础的混合检索，`Reranker` 组件的深度集成将在后续迭代中增强。
 
 ---
 
 ### 3.6 文档摄入架构
 
-**实现文件**：`src/cognizes/engine/perception/ingestion.py`
+**实现文件**：[src/cognizes/engine/perception/ingestion.py](../../src/cognizes/engine/perception/ingestion.py)
 
 #### 3.6.1 摄入管道 (Ingestion Pipeline)
 
@@ -774,7 +797,7 @@ flowchart TB
 
 ### 3.7 Chunking 策略体系
 
-**实现文件**：`src/cognizes/engine/perception/chunking.py`
+**实现文件**：[src/cognizes/engine/perception/chunking.py](../../src/cognizes/engine/perception/chunking.py)
 
 #### 3.7.1 四种策略对比
 
@@ -809,7 +832,7 @@ flowchart TD
 
 ### 3.8 Rerank 精排层
 
-**实现文件**：`src/cognizes/engine/perception/reranker.py`
+**实现文件**：[src/cognizes/engine/perception/reranker.py](../../src/cognizes/engine/perception/reranker.py)
 
 #### 3.8.1 两阶段检索架构
 
@@ -859,7 +882,7 @@ flowchart LR
 | P3-1-4  | 编写 Keyword Search SQL   | `to_tsvector @@ plainto_tsquery` 正确 |
 | P3-1-5  | 编写 One-Shot Hybrid 函数 | `hybrid_search()` 函数创建成功        |
 
-**Schema 扩展脚本** (`src/cognizes/engine/schema/perception_schema.sql`)：
+**Schema 扩展脚本** ([src/cognizes/engine/schema/perception_schema.sql](../../src/cognizes/engine/schema/perception_schema.sql))：
 
 > [!TIP]
 >
@@ -890,7 +913,7 @@ WHERE tablename = 'memories' AND indexname = 'idx_memories_search_vector';
 | P3-1-8  | 实现应用层 RRF (Python)     | Python 函数实现     |
 | P3-1-9  | 对比 SQL vs 应用层 RRF 性能 | 性能对比报告        |
 
-**Python RRF 实现** (`src/cognizes/engine/perception/rrf_fusion.py`)：
+**Python RRF 实现** ([src/cognizes/engine/perception/rrf_fusion.py](../../src/cognizes/engine/perception/rrf_fusion.py))：
 
 ```python
 """
@@ -1050,7 +1073,7 @@ SELECT COUNT(*) FROM (
 -- 预期: 应返回 10 条结果 (迭代扫描生效)
 ```
 
-**性能基准测试脚本** (`src/cognizes/engine/perception/benchmark.py`)：
+**性能基准测试脚本** ([src/cognizes/engine/perception/benchmark.py](../../src/cognizes/engine/perception/benchmark.py))：
 
 ```python
 """
@@ -1158,7 +1181,7 @@ if __name__ == "__main__":
 | P3-2-7  | 实现 Top-50 -> Rerank -> Top-10 流程 | Pipeline 代码实现          |
 | P3-2-8  | 验证 Precision@10 提升               | 对比无 Rerank 的 Precision |
 
-**Reranker 实现** (`src/cognizes/engine/perception/reranker.py`)：
+**Reranker 实现** ([src/cognizes/engine/perception/reranker.py](../../src/cognizes/engine/perception/reranker.py))：
 
 ```python
 """
@@ -1418,7 +1441,7 @@ graph TB
 
 #### 4.4.3 SearchVisualizer 实现
 
-创建 `src/cognizes/engine/perception/search_visualizer.py`：
+创建 [src/cognizes/engine/perception/search_visualizer.py](../../src/cognizes/engine/perception/search_visualizer.py)：
 
 ```python
 """
@@ -2155,7 +2178,7 @@ WHERE proname = 'kb_hybrid_search';
 
 > [!NOTE]
 >
-> **实现文件**：`src/cognizes/engine/perception/chunking.py` > **测试覆盖**：`tests/unittests/perception/test_chunking.py`
+> **实现文件**：[src/cognizes/engine/perception/chunking.py](../../src/cognizes/engine/perception/chunking.py) > **测试覆盖**：[tests/unittests/perception/test_chunking.py](../../tests/unittests/perception/test_chunking.py)
 
 ```bash
 # 1. 验证 Chunking 模块导入
@@ -2200,7 +2223,7 @@ uv run pytest tests/unittests/perception/test_chunking.py -v --tb=short -m "not 
 
 > [!NOTE]
 >
-> **实现文件**：`src/cognizes/engine/perception/rag_pipeline.py` > **测试覆盖**：`tests/integration/perception/test_rag_e2e.py`
+> **实现文件**：[src/cognizes/engine/perception/rag_pipeline.py](../../src/cognizes/engine/perception/rag_pipeline.py) > **测试覆盖**：[tests/integration/perception/test_rag_e2e.py](../../tests/integration/perception/test_rag_e2e.py)
 
 ```bash
 # 1. 验证 RAG Pipeline 模块导入
@@ -2732,32 +2755,32 @@ if __name__ == "__main__":
 
 ### 5.5. 交付物清单
 
-| 类别       | 文件路径                                                    | 描述                                                                                       | 任务 ID          |
-| :--------- | :---------------------------------------------------------- | :----------------------------------------------------------------------------------------- | :--------------- |
-| **文档**   | `docs/030-the-perception.md`                                | 本实施方案文档                                                                             | P3-3-1           |
-| **Schema** | `src/cognizes/engine/schema/perception_schema.sql`          | Perception Schema 扩展 (含 corpus, knowledge, hybrid_search, rrf_search, kb_hybrid_search) | P3-1-1 ~ P3-4-10 |
-| **Python** | `src/cognizes/engine/perception/rrf_fusion.py`              | Python RRF 实现                                                                            | P3-1-8           |
-| **Python** | `src/cognizes/engine/perception/reranker.py`                | Cross-Encoder Reranker 实现                                                                | P3-3-3           |
-| **Python** | `src/cognizes/engine/perception/search_visualizer.py`       | AG-UI 检索过程可视化                                                                       | P3-4-2           |
-| **Python** | `src/cognizes/engine/perception/benchmark.py`               | 性能基准测试脚本                                                                           | P3-2-4           |
-| **Python** | `src/cognizes/engine/perception/generate_test_data.py`      | 测试数据生成脚本                                                                           | P3-2-1           |
-| **Python** | `src/cognizes/engine/perception/chunking.py`                | Chunking 策略 (Fixed/Recursive/Semantic/Hierarchical)                                      | P3-5-2           |
-| **Python** | `src/cognizes/engine/perception/embedder.py`                | Embedding 服务 (OpenAI/SentenceTransformers/Mock) (**NEW**)                                | P3-5-3           |
-| **Python** | `src/cognizes/engine/perception/ingestion.py`               | 文档摄入服务 (Markdown/TXT/PDF) (**NEW**)                                                  | P3-5-1           |
-| **Python** | `src/cognizes/engine/perception/rag_pipeline.py`            | RAG Pipeline 完整链路 (Index/Retrieve/Generate) (**NEW**)                                  | P3-5-4           |
-| **测试**   | `tests/perception/test_hybrid_search.py`                    | Hybrid Search 单元测试                                                                     | P3-3-4           |
-| **测试**   | `tests/perception/test_reranker.py`                         | Reranker 单元测试                                                                          | P3-3-4           |
-| **测试**   | `tests/unittests/perception/test_rrf_fusion.py`             | RRF Fusion 单元测试                                                                        | P3-1-8           |
-| **测试**   | `tests/unittests/perception/test_search_visualizer.py`      | SearchVisualizer 单元测试                                                                  | P3-4-2           |
-| **测试**   | `tests/unittests/perception/test_chunking.py`               | Chunking 单元测试 (**NEW**)                                                                | P3-5-2           |
-| **测试**   | `tests/unittests/perception/test_embedder.py`               | Embedder 单元测试 (**NEW**)                                                                | P3-5-3           |
-| **测试**   | `tests/unittests/perception/test_ingestion.py`              | Ingestion 单元测试 (**NEW**)                                                               | P3-5-1           |
-| **测试**   | `tests/unittests/perception/test_rag_pipeline.py`           | RAG Pipeline 单元测试 (**NEW**)                                                            | P3-5-4           |
-| **测试**   | `tests/integration/perception/test_hybrid_search.py`        | Hybrid Search 集成测试                                                                     | P3-1-5           |
-| **测试**   | `tests/integration/perception/test_high_selectivity.py`     | High-Selectivity 集成测试                                                                  | P3-2-3           |
-| **测试**   | `tests/integration/perception/test_kb_search.py`            | Knowledge Base 检索集成测试                                                                | P3-4-10          |
-| **测试**   | `tests/integration/perception/test_chunking_integration.py` | Chunking 集成测试 (**NEW**)                                                                | P3-5-2           |
-| **测试**   | `tests/integration/perception/test_rag_e2e.py`              | RAG E2E 集成测试 (RAG-E2E-01~05) (**NEW**)                                                 | P3-5-5           |
+| 类别       | 文件路径                                                                                                           | 描述                                                                                       | 任务 ID          |
+| :--------- | :----------------------------------------------------------------------------------------------------------------- | :----------------------------------------------------------------------------------------- | :--------------- |
+| **文档**   | `docs/030-the-perception.md`                                                                                       | 本实施方案文档                                                                             | P3-3-1           |
+| **Schema** | [src/cognizes/engine/schema/perception_schema.sql](../../src/cognizes/engine/schema/perception_schema.sql)         | Perception Schema 扩展 (含 corpus, knowledge, hybrid_search, rrf_search, kb_hybrid_search) | P3-1-1 ~ P3-4-10 |
+| **Python** | [src/cognizes/engine/perception/rrf_fusion.py](../../src/cognizes/engine/perception/rrf_fusion.py)                 | Python RRF 实现                                                                            | P3-1-8           |
+| **Python** | [src/cognizes/engine/perception/reranker.py](../../src/cognizes/engine/perception/reranker.py)                     | Cross-Encoder Reranker 实现                                                                | P3-3-3           |
+| **Python** | [src/cognizes/engine/perception/search_visualizer.py](../../src/cognizes/engine/perception/search_visualizer.py)   | AG-UI 检索过程可视化                                                                       | P3-4-2           |
+| **Python** | [src/cognizes/engine/perception/benchmark.py](../../src/cognizes/engine/perception/benchmark.py)                   | 性能基准测试脚本                                                                           | P3-2-4           |
+| **Python** | [src/cognizes/engine/perception/generate_test_data.py](../../src/cognizes/engine/perception/generate_test_data.py) | 测试数据生成脚本                                                                           | P3-2-1           |
+| **Python** | [src/cognizes/engine/perception/chunking.py](../../src/cognizes/engine/perception/chunking.py)                     | Chunking 策略 (Fixed/Recursive/Semantic/Hierarchical)                                      | P3-5-2           |
+| **Python** | [src/cognizes/engine/perception/embedder.py](../../src/cognizes/engine/perception/embedder.py)                     | Embedding 服务 (OpenAI/SentenceTransformers/Mock) (**NEW**)                                | P3-5-3           |
+| **Python** | [src/cognizes/engine/perception/ingestion.py](../../src/cognizes/engine/perception/ingestion.py)                   | 文档摄入服务 (Markdown/TXT/PDF) (**NEW**)                                                  | P3-5-1           |
+| **Python** | [src/cognizes/engine/perception/rag_pipeline.py](../../src/cognizes/engine/perception/rag_pipeline.py)             | RAG Pipeline 完整链路 (Index/Retrieve/Generate) (**NEW**)                                  | P3-5-4           |
+| **测试**   | `tests/perception/test_hybrid_search.py`                                                                           | Hybrid Search 单元测试                                                                     | P3-3-4           |
+| **测试**   | `tests/perception/test_reranker.py`                                                                                | Reranker 单元测试                                                                          | P3-3-4           |
+| **测试**   | `tests/unittests/perception/test_rrf_fusion.py`                                                                    | RRF Fusion 单元测试                                                                        | P3-1-8           |
+| **测试**   | `tests/unittests/perception/test_search_visualizer.py`                                                             | SearchVisualizer 单元测试                                                                  | P3-4-2           |
+| **测试**   | `tests/unittests/perception/test_chunking.py`                                                                      | Chunking 单元测试 (**NEW**)                                                                | P3-5-2           |
+| **测试**   | `tests/unittests/perception/test_embedder.py`                                                                      | Embedder 单元测试 (**NEW**)                                                                | P3-5-3           |
+| **测试**   | `tests/unittests/perception/test_ingestion.py`                                                                     | Ingestion 单元测试 (**NEW**)                                                               | P3-5-1           |
+| **测试**   | `tests/unittests/perception/test_rag_pipeline.py`                                                                  | RAG Pipeline 单元测试 (**NEW**)                                                            | P3-5-4           |
+| **测试**   | `tests/integration/perception/test_hybrid_search.py`                                                               | Hybrid Search 集成测试                                                                     | P3-1-5           |
+| **测试**   | `tests/integration/perception/test_high_selectivity.py`                                                            | High-Selectivity 集成测试                                                                  | P3-2-3           |
+| **测试**   | `tests/integration/perception/test_kb_search.py`                                                                   | Knowledge Base 检索集成测试                                                                | P3-4-10          |
+| **测试**   | `tests/integration/perception/test_chunking_integration.py`                                                        | Chunking 集成测试 (**NEW**)                                                                | P3-5-2           |
+| **测试**   | `tests/integration/perception/test_rag_e2e.py`                                                                     | RAG E2E 集成测试 (RAG-E2E-01~05) (**NEW**)                                                 | P3-5-5           |
 
 > [!NOTE]
 >
