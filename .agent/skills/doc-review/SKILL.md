@@ -1,6 +1,6 @@
 ---
 name: doc-review
-description: 对文档进行系统性审计与熵减优化，确保架构正交、逻辑自洽、内容完整且直观。
+description: 对文档进行系统性 Review，包括但不限于：审计与熵减优化，确保架构正交、逻辑自洽、内容完整且直观。
 allowed-tools: view_file, list_dir, grep_search, find_by_name, replace_file_content, multi_replace_file_content, write_to_file, search_web
 ---
 
@@ -8,7 +8,7 @@ allowed-tools: view_file, list_dir, grep_search, find_by_name, replace_file_cont
 
 本 Skill 旨在为文档提供标准化、全维度的审查与精调服务。不仅要发现问题，更要**解决问题**。通过系统性思维与架构视角审查文档，并在确认优化方案后，**主动将精调后的版本直接落实到目标文档中**，确保文档质量的实质性提升。
 
-## 核心审查维度 (The 5 Pillars)
+## 核心审查点
 
 依据 `AGENTS.md` 的工程行为准则，从以下五个正交维度对文档进行深度审计：
 
@@ -42,7 +42,7 @@ allowed-tools: view_file, list_dir, grep_search, find_by_name, replace_file_cont
 - **视觉层级**：标题、列表、引用块的使用是否构建了清晰的信息层级？
 - **代码规范**：代码示例是否完整、可运行，并符合 Vibe Coding Pipeline 标准？
 
-## 审查工作流 (Review Workflow)
+## 审查流程
 
 ### Step 1: 全景扫描 (Panorama Scan)
 
@@ -85,39 +85,3 @@ Review 的最终目的不是产出报告，而是**产出更好的文档**。
 2. **Review Report (次选)**:
    - 仅在遇到需要用户决策的重大架构问题或不确定性较高时，才输出纯建议报告。
    - 报告中应包含问题分级（Critical/Major/Minor）。
-
-## 最佳实践 (Best Practices & Examples)
-
-本 Skill 适用于以下核心场景，请根据具体需求选择侧重点：
-
-### Scenario 1: 架构设计验收 (Systemic & Orthogonal Check)
-
-**适用场景**：提交新的设计文档 (Design Doc) 或重大架构变更时。
-**核心关注**：系统性完整性、概念正交性、与 `AGENTS.md` 的对齐度。
-**Prompt**:
-
-> "Review `docs/engine/030-the-perception.md`. 重点审查其是否遵循 **正交分解** 原则，检查 'Retrieval' 与 'Ranking' 模块是否解耦。同时验证与 `AGENTS.md` 中 'Entropy Reduction' 理念的符合度。"
-
-### Scenario 2: SOP 可执行性验证 (Consistency & Completeness)
-
-**适用场景**：编写操作手册、部署指南或教程时。
-**核心关注**：步骤的顺序自洽、命令的完整性、环境依赖的前置声明。
-**Prompt**:
-
-> "检查 `docs/implementation/deployment.md`。像一个新入职工程师一样**模拟执行**所有步骤。验证 Step 2 的 Docker 命令是否依赖 Step 1 的环境变量？是否存在隐含的前置条件未列出？"
-
-### Scenario 3: 存量文档熵减 (Entropy Reduction & Intuitiveness)
-
-**适用场景**：重构历史遗留文档、会议记录或混乱的草稿。
-**核心关注**：结构重组、信噪比优化、可视化降维。
-**Prompt**:
-
-> "重构 `docs/research/010-context-engineering.md`。执行 **Panorama Scan**，如果字数超过 5000 字请建议拆分。将第 3 节复杂的文本描述转换为 Meredith 时序图。删除所有非信息量的形容词。"
-
-### Scenario 4: 代码-文档一致性校验 (Fact Check)
-
-**适用场景**：代码变更后的文档同步更新。
-**核心关注**：单一事实来源 (SSOT)、参数准确性、代码引用有效性。
-**Prompt**:
-
-> "基于 `src/cognizes/engine/schema/perception_schema.sql` 的最新变更，审查 `docs/engine/030-the-perception.md` 中的 Schema 定义。指出所有过时或不一致的字段描述。"
