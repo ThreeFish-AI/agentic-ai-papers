@@ -928,10 +928,12 @@ psql -d cognizes-engine -f src/cognizes/engine/schema/perception_schema.sql
 **验证查询**：
 
 ```sql
--- 验证索引是否存在
-SELECT indexname, indexdef
-FROM pg_indexes
-WHERE tablename = 'memories' AND indexname = 'idx_memories_search_vector';
+-- 验证 Schema 完整性 (Indexes & Functions)
+SELECT
+    (SELECT count(*) FROM pg_indexes WHERE indexname = 'idx_memories_search_vector') as has_index,
+    (SELECT count(*) FROM pg_proc WHERE proname = 'hybrid_search') as has_function,
+    (SELECT count(*) FROM information_schema.columns WHERE table_name='memories' AND column_name='search_vector') as has_column;
+-- 预期输出: 1 | 1 | 1
 ```
 
 #### 4.1.2 RRF 融合算法 (Reciprocal Rank Fusion)
@@ -948,27 +950,13 @@ WHERE tablename = 'memories' AND indexname = 'idx_memories_search_vector';
 **Python RRF 实现** ([src/cognizes/engine/perception/rrf_fusion.py](../../src/cognizes/engine/perception/rrf_fusion.py))：
 
 ```python
-"""
-RRF (Reciprocal Rank Fusion) 实现
-
-融合多路检索结果，使用倒数排名公式合并排序。
-"""
-
-from __future__ import annotations
-
-from dataclasses import dataclass
-from typing import Any
-
-
 @dataclass
 class SearchResult:
     """单条检索结果"""
     id: str
-    content: str
     score: float
-    metadata: dict[str, Any] | None = None
     rank: int = 0
-
+    ...
 
 def rrf_fusion(
     result_lists: list[list[SearchResult]],
@@ -976,88 +964,16 @@ def rrf_fusion(
     limit: int = 50
 ) -> list[SearchResult]:
     """
-    Reciprocal Rank Fusion 算法
-
-    公式: RRF(d) = Σ (1 / (k + rank(d)))
-
-    Args:
-        result_lists: 多个检索器的结果列表
-        k: 平滑常数 (标准值 60)
-        limit: 返回结果数量
-
-    Returns:
-        融合后的排序结果
+    Reciprocal Rank Fusion 算法: RRF(d) = Σ (1 / (k + rank(d)))
     """
-    # 1. 为每个列表分配排名
-    for results in result_lists:
-        for rank, result in enumerate(results, start=1):
-            result.rank = rank
-
-    # 2. 按 ID 聚合计算 RRF 分数
-    rrf_scores: dict[str, tuple[float, SearchResult]] = {}
-
-    for results in result_lists:
-        for result in results:
-            if result.id not in rrf_scores:
-                rrf_scores[result.id] = (0.0, result)
-
-            current_score, current_result = rrf_scores[result.id]
-            # RRF 公式: 1 / (k + rank)
-            new_score = current_score + 1.0 / (k + result.rank)
-            rrf_scores[result.id] = (new_score, current_result)
-
-    # 3. 按 RRF 分数排序
-    sorted_results = sorted(
-        rrf_scores.values(),
-        key=lambda x: x[0],
-        reverse=True
-    )
-
-    # 4. 返回 Top-K 结果
-    return [
-        SearchResult(
-            id=result.id,
-            content=result.content,
-            score=score,
-            metadata=result.metadata
-        )
-        for score, result in sorted_results[:limit]
-    ]
-
-
-# 使用示例
-if __name__ == "__main__":
-    # 模拟两路检索结果
-    semantic_results = [
-        SearchResult(id="doc1", content="Python programming", score=0.95),
-        SearchResult(id="doc2", content="Machine learning", score=0.90),
-        SearchResult(id="doc3", content="Data science", score=0.85),
-    ]
-
-    keyword_results = [
-        SearchResult(id="doc2", content="Machine learning", score=0.88),
-        SearchResult(id="doc4", content="Deep learning", score=0.85),
-        SearchResult(id="doc1", content="Python programming", score=0.80),
-    ]
-
-    fused = rrf_fusion([semantic_results, keyword_results], k=60, limit=10)
-
-    for result in fused:
-        print(f"ID: {result.id}, RRF Score: {result.score:.4f}")
+    ...
 ```
 
-### 4.2 Step 2: 工程挑战：高过滤比 (High-Selectivity)
+### 4.2 Step 2: 高过滤比验证 (High-Selectivity)
 
-> [!WARNING]
->
-> **The Top-K Trap**: 在 "Strict Filtering" (如私有记忆检索) 场景下，若符合条件的数据极少 (e.g., 0.1%)，由于 HNSW 的近似最近邻特性，标准 Top-K 查询可能返回空集。
+**核心挑战 (The Top-K Trap)**: 在私有记忆 (Private Memory) 等 **强过滤 (High-Selectivity)** 场景下，若符合元数据过滤条件的数据极为稀疏 (e.g., < 1%)，HNSW 的早期截断机制 (Early Termination) 可能导致召回为空，即使库中存在匹配项。这是 ANN 算法在 Pre-Filtering 场景下的固有缺陷。
 
-**解决方案**: 启用 PGVector 0.8.0+ 的 **Iterative Index Scan**。即在索引扫描未满足 `LIMIT` 时，自动扩大搜索半径，直到找到足够的符合元数据过滤条件的记录。
-
-```sql
-SET hnsw.iterative_scan = relaxed_order; -- 牺牲严格顺序换取召回率
-SET hnsw.max_scan_tuples = 20000;        -- 设定扫描上限防止全表扫描
-```
+**解决方案 (Iterative Scan)**: 利用 PGVector 0.8.0+ 的 **Iterative Index Scan** 机制。该机制允许 HNSW 在未收集满符合 `LIMIT` 的记录时自动扩展搜索半径。
 
 #### 4.2.1 迭代扫描配置
 
@@ -1070,17 +986,17 @@ SET hnsw.max_scan_tuples = 20000;        -- 设定扫描上限防止全表扫描
 | P3-2-3  | 验证 HNSW 迭代扫描 (v0.8.0+)       | `hnsw.iterative_scan = relaxed_order` |
 | P3-2-4  | 记录 QPS 与 Recall 基准数据        | 基准性能报告                          |
 
-**迭代扫描配置脚本**：
+**配置脚本**：
 
 ```sql
 -- ============================================
 -- High-Selectivity Filtering 配置
 -- ============================================
 
--- 1. 开启迭代扫描 (PGVector 0.8.0+)
+-- 1. 开启迭代扫描 (牺牲微小的距离排序严格性换取召回率)
 SET hnsw.iterative_scan = relaxed_order;
 
--- 2. 设置最大扫描元组数 (防止无限扫描)
+-- 2. 设置最大扫描元组数 (防止最坏情况下的全表扫描)
 SET hnsw.max_scan_tuples = 20000;
 
 -- 3. 增大 ef_search 提高召回率
@@ -1108,101 +1024,37 @@ SELECT COUNT(*) FROM (
 **性能基准测试脚本** ([src/cognizes/engine/perception/benchmark.py](../../src/cognizes/engine/perception/benchmark.py))：
 
 ```python
-"""
-High-Selectivity Filtering 性能基准测试
-
-测试不同 ef_search 参数下的 QPS 和 Recall@K。
-"""
-
-import asyncio
-import time
-from dataclasses import dataclass
-
-import asyncpg
-import numpy as np
-
-
 @dataclass
 class BenchmarkResult:
-    """基准测试结果"""
-    ef_search: int
-    qps: float
-    recall_at_10: float
+    ef_search: int       # HNSW 搜索宽度 (关键调优参数)
+    qps: float           # 每秒查询数 (Performance)
+    recall_at_10: float  # Top-10 召回率 (Quality)
     p99_latency_ms: float
-
 
 async def run_benchmark(
     pool: asyncpg.Pool,
     query_embedding: list[float],
     user_id: str,
-    ef_search_values: list[int],
-    iterations: int = 100
+    ef_search_values: list[int]
 ) -> list[BenchmarkResult]:
-    """运行基准测试"""
-    results = []
+    """
+    运行基准测试: 针对特定 user_id (High Selectivity) 测试不同 ef_search 下的 QPS/Recall.
 
-    for ef_search in ef_search_values:
-        # 设置 ef_search
-        await pool.execute(f"SET hnsw.ef_search = {ef_search}")
-        await pool.execute("SET hnsw.iterative_scan = relaxed_order")
-
-        latencies = []
-        recall_count = 0
-
-        for _ in range(iterations):
-            start = time.perf_counter()
-
-            rows = await pool.fetch("""
-                SELECT id, content
-                FROM memories
-                WHERE user_id = $1
-                ORDER BY embedding <=> $2
-                LIMIT 10
-            """, user_id, query_embedding)
-
-            latency = (time.perf_counter() - start) * 1000
-            latencies.append(latency)
-            recall_count += len(rows)
-
-        results.append(BenchmarkResult(
-            ef_search=ef_search,
-            qps=iterations / (sum(latencies) / 1000),
-            recall_at_10=recall_count / (iterations * 10),
-            p99_latency_ms=np.percentile(latencies, 99)
-        ))
-
-    return results
-
-
-# 使用示例
-async def main():
-    pool = await asyncpg.create_pool("postgresql://aigc:@localhost/cognizes-engine")
-
-    # 生成随机查询向量
-    query_embedding = list(np.random.randn(1536).astype(float))
-
-    results = await run_benchmark(
-        pool,
-        query_embedding,
-        user_id="rare_user_001",
-        ef_search_values=[40, 100, 200, 400]
-    )
-
-    print("| ef_search | QPS | Recall@10 | P99 Latency |")
-    print("|-----------|-----|-----------|-------------|")
-    for r in results:
-        print(f"| {r.ef_search} | {r.qps:.1f} | {r.recall_at_10:.2%} | {r.p99_latency_ms:.1f}ms |")
-
-    await pool.close()
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
+    用于量化分析 "召回率 (Recall) vs 延迟 (Latency)" 的 Trade-off，辅助确定生产环境的最佳 ef_search 配置。
+    """
+    ...
 ```
 
-### 4.3 Step 3: L1 Reranking 实现
+### 4.3 Step 3: 两阶段检索实现 (Two-Stage Retrieval)
 
-#### 4.3.1 Reranker 集成
+> [!NOTE]
+>
+> 本模块封装了完整的 "Recall + Rerank" 检索链路，作为 `RAGPipeline` 的上游子系统。
+>
+> - **L0 (Recall)**: Postgres 负责广度召回 (Candidate Generation)。
+> - **L1 (Rerank)**: Cross-Encoder 负责深度精排 (Precision Refinement)。
+
+#### 4.3.1 检索链路集成
 
 **任务清单**：
 
@@ -1213,123 +1065,32 @@ if __name__ == "__main__":
 | P3-2-7  | 实现 Top-50 -> Rerank -> Top-10 流程 | Pipeline 代码实现          |
 | P3-2-8  | 验证 Precision@10 提升               | 对比无 Rerank 的 Precision |
 
-**Reranker 实现** ([src/cognizes/engine/perception/reranker.py](../../src/cognizes/engine/perception/reranker.py))：
+#### 4.3.2 检索数据流图
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Retriever as Two-Stage Retriever<br>(RerankerPipeline)
+    participant DB as Postgres (L0)
+    participant Model as CrossEncoder (L1)
+
+    User->>Retriever: search(query)
+    Retriever->>DB: hybrid_search(top_50)
+    DB-->>Retriever: Candidates
+    Retriever->>Model: rerank(query, candidates)
+    Model-->>Retriever: Top-10 Results
+    Retriever-->>User: Refined Context
+```
+
+**核心接口** ([src/cognizes/engine/perception/reranker.py](../../src/cognizes/engine/perception/reranker.py))：
 
 ```python
-"""
-L1 Reranker 实现
-
-使用 Cross-Encoder 模型对 L0 粗排结果进行精排。
-"""
-
-from __future__ import annotations
-
-from dataclasses import dataclass
-from typing import Any
-
-import torch
-from transformers import AutoModelForSequenceClassification, AutoTokenizer
-
-
-@dataclass
-class RerankedResult:
-    """重排后的结果"""
-    id: str
-    content: str
-    original_score: float
-    rerank_score: float
-    metadata: dict[str, Any] | None = None
-
-
 class CrossEncoderReranker:
-    """
-    Cross-Encoder 重排器
-
-    使用 BAAI/bge-reranker-base 模型进行语义重排。
-    """
-
-    def __init__(
-        self,
-        model_name: str = "BAAI/bge-reranker-base",
-        device: str | None = None
-    ):
-        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.model = AutoModelForSequenceClassification.from_pretrained(model_name)
-        self.model.to(self.device)
-        self.model.eval()
-
-    def rerank(
-        self,
-        query: str,
-        documents: list[dict[str, Any]],
-        top_k: int = 10
-    ) -> list[RerankedResult]:
-        """
-        对文档进行重排序
-
-        Args:
-            query: 用户查询
-            documents: 待重排文档列表 (需包含 id, content, score)
-            top_k: 返回 Top-K 结果
-
-        Returns:
-            重排后的结果列表
-        """
-        if not documents:
-            return []
-
-        # 1. 构建 Query-Document 对
-        pairs = [[query, doc["content"]] for doc in documents]
-
-        # 2. Tokenize
-        inputs = self.tokenizer(
-            pairs,
-            padding=True,
-            truncation=True,
-            max_length=512,
-            return_tensors="pt"
-        ).to(self.device)
-
-        # 3. 推理
-        with torch.no_grad():
-            scores = self.model(**inputs).logits.squeeze(-1)
-
-        # 4. 归一化分数 (sigmoid)
-        scores = torch.sigmoid(scores).cpu().numpy()
-
-        # 5. 构建结果
-        results = []
-        for doc, rerank_score in zip(documents, scores):
-            results.append(RerankedResult(
-                id=doc["id"],
-                content=doc["content"],
-                original_score=doc.get("score", 0.0),
-                rerank_score=float(rerank_score),
-                metadata=doc.get("metadata")
-            ))
-
-        # 6. 按重排分数排序
-        results.sort(key=lambda x: x.rerank_score, reverse=True)
-
-        return results[:top_k]
-
+    """L1 Prerequisite: 使用 Cross-Encoder 对 Recall 结果进行精排"""
+    def rerank(self, query: str, documents: list[dict[str, Any]], top_k: int = 10) -> list[RerankedResult]: ...
 
 class RerankerPipeline:
-    """
-    完整的两阶段检索 Pipeline
-
-    L0 (数据库粗排) -> L1 (Cross-Encoder 精排)
-    """
-
-    def __init__(
-        self,
-        db_pool,  # asyncpg.Pool
-        reranker: CrossEncoderReranker | None = None
-    ):
-        self.db_pool = db_pool
-        self.reranker = reranker or CrossEncoderReranker()
-
+    """检索子系统: 封装 L0 (Database) -> L1 (Reranker) 的完整过程"""
     async def search(
         self,
         user_id: str,
@@ -1337,77 +1098,8 @@ class RerankerPipeline:
         query: str,
         query_embedding: list[float],
         l0_limit: int = 50,
-        l1_limit: int = 10
-    ) -> list[RerankedResult]:
-        """
-        两阶段检索
-
-        Args:
-            user_id: 用户 ID
-            app_name: 应用名称
-            query: 用户查询文本
-            query_embedding: 查询向量
-            l0_limit: L0 粗排返回数量
-            l1_limit: L1 精排返回数量
-
-        Returns:
-            精排后的结果列表
-        """
-        # L0: 数据库混合检索
-        rows = await self.db_pool.fetch("""
-            SELECT id, content, combined_score, metadata
-            FROM hybrid_search($1, $2, $3, $4, $5)
-        """, user_id, app_name, query, query_embedding, l0_limit)
-
-        documents = [
-            {
-                "id": str(row["id"]),
-                "content": row["content"],
-                "score": row["combined_score"],
-                "metadata": row["metadata"]
-            }
-            for row in rows
-        ]
-
-        # L1: Cross-Encoder 重排
-        results = self.reranker.rerank(query, documents, top_k=l1_limit)
-
-        return results
-
-
-# 使用示例
-async def main():
-    import asyncpg
-
-    # 初始化
-    pool = await asyncpg.create_pool("postgresql://aigc:@localhost/cognizes-engine")
-    pipeline = RerankerPipeline(pool)
-
-    # 生成查询向量 (实际应使用 Embedding 模型)
-    import numpy as np
-    query_embedding = list(np.random.randn(1536).astype(float))
-
-    # 执行两阶段检索
-    results = await pipeline.search(
-        user_id="user_001",
-        app_name="demo_app",
-        query="How to implement RAG with PostgreSQL?",
-        query_embedding=query_embedding,
-        l0_limit=50,
-        l1_limit=10
-    )
-
-    # 输出结果
-    print("Top 10 Reranked Results:")
-    for i, r in enumerate(results, 1):
-        print(f"{i}. [Score: {r.rerank_score:.4f}] {r.content[:100]}...")
-
-    await pool.close()
-
-
-if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())
+        l1_limit: int = 10,
+    ) -> list[RerankedResult]: ...
 ```
 
 ---
@@ -1476,24 +1168,6 @@ graph TB
 创建 [src/cognizes/engine/perception/search_visualizer.py](../../src/cognizes/engine/perception/search_visualizer.py)：
 
 ```python
-"""
-Perception SearchVisualizer: 检索过程可视化接口
-
-职责:
-1. 提供多路召回过程可视化
-2. 展示 RRF 融合和 Rerank 过程
-3. 生成引用来源标注
-"""
-
-from __future__ import annotations
-
-import json
-from dataclasses import dataclass, field
-from typing import Any, Optional
-from datetime import datetime
-from enum import Enum
-
-
 class SearchEventType(str, Enum):
     """检索相关 AG-UI 事件类型"""
     RETRIEVAL_DETAIL = "retrieval_detail"
@@ -1501,266 +1175,47 @@ class SearchEventType(str, Enum):
     RERANK_RESULT = "rerank_result"
     SOURCE_CITATION = "source_citation"
 
-
 @dataclass
-class RetrievalPathResult:
-    """单路检索结果"""
-    path_name: str  # semantic, keyword, metadata
-    doc_count: int
-    latency_ms: float
-    top_docs: list[dict]  # [{id, score, preview}]
-
-
+class RetrievalPathResult: ...
 @dataclass
-class RRFMergeResult:
-    """RRF 融合结果"""
-    input_paths: list[str]
-    output_count: int
-    rank_changes: list[dict]  # [{doc_id, before_rank, after_rank}]
-
-
+class RRFMergeResult: ...
 @dataclass
-class RerankComparison:
-    """Rerank 前后对比"""
-    doc_id: str
-    content_preview: str
-    l0_score: float  # 粗排分数
-    l1_score: float  # 精排分数
-    rank_before: int
-    rank_after: int
-
-
+class RerankComparison: ...
 @dataclass
-class SourceCitation:
-    """引用来源"""
-    doc_id: str
-    source_type: str  # memory, document, web
-    title: str
-    url: Optional[str] = None
-    snippet: str = ""
-    relevance_score: float = 0.0
-
+class SourceCitation: ...
 
 class SearchVisualizer:
-    """检索过程可视化器"""
+    """检索过程可视化器: 负责将检索中间状态转换为 AG-UI 事件"""
 
-    def __init__(self, event_emitter=None):
-        """
-        Args:
-            event_emitter: AG-UI 事件发射器 (可选)
-        """
-        self._event_emitter = event_emitter
+    def __init__(self, event_emitter=None): ...
 
-    async def emit_search_started(
-        self,
-        run_id: str,
-        query: str,
-        search_config: dict
-    ) -> None:
-        """
-        发射检索开始事件
+    async def emit_search_started(self, run_id: str, query: str, search_config: dict) -> None:
+        """发射 STEP_STARTED 事件"""
+        ...
 
-        Args:
-            run_id: 当前运行 ID
-            query: 搜索查询
-            search_config: 检索配置
-        """
-        if self._event_emitter:
-            await self._event_emitter.emit_step_started(
-                run_id=run_id,
-                step_name="perception_search",
-                data={
-                    "query": query,
-                    "config": {
-                        "semanticWeight": search_config.get("semantic_weight", 0.5),
-                        "keywordWeight": search_config.get("keyword_weight", 0.3),
-                        "metadataFilters": search_config.get("filters", {}),
-                        "topK": search_config.get("top_k", 50)
-                    }
-                }
-            )
+    async def emit_retrieval_paths(self, run_id: str, path_results: list[RetrievalPathResult]) -> None:
+        """发射 CUSTOM (retrieval_detail) 事件"""
+        ...
 
-    async def emit_retrieval_paths(
-        self,
-        run_id: str,
-        path_results: list[RetrievalPathResult]
-    ) -> None:
-        """
-        发射多路召回详情事件
+    async def emit_rrf_merge(self, run_id: str, merge_result: RRFMergeResult) -> None:
+        """发射 CUSTOM (rrf_result) 事件"""
+        ...
 
-        用于展示各检索路径的召回结果对比
+    async def emit_rerank_comparison(self, run_id: str, comparisons: list[RerankComparison]) -> None:
+        """发射 CUSTOM (rerank_result) 事件"""
+        ...
 
-        Args:
-            run_id: 当前运行 ID
-            path_results: 各路检索结果
-        """
-        if self._event_emitter:
-            await self._event_emitter.emit_custom(
-                run_id=run_id,
-                event_name=SearchEventType.RETRIEVAL_DETAIL.value,
-                data={
-                    "paths": [
-                        {
-                            "name": p.path_name,
-                            "docCount": p.doc_count,
-                            "latencyMs": p.latency_ms,
-                            "topDocs": p.top_docs[:5]  # 只展示 Top 5
-                        }
-                        for p in path_results
-                    ],
-                    "totalLatencyMs": sum(p.latency_ms for p in path_results)
-                }
-            )
+    async def emit_search_finished(self, run_id: str, result_count: int, total_latency_ms: float) -> None:
+        """发射 STEP_FINISHED 事件"""
+        ...
 
-    async def emit_rrf_merge(
-        self,
-        run_id: str,
-        merge_result: RRFMergeResult
-    ) -> None:
-        """
-        发射 RRF 融合结果事件
+    def generate_citations(self, search_results: list[dict]) -> list[SourceCitation]:
+        """生成引用来源列表"""
+        ...
 
-        Args:
-            run_id: 当前运行 ID
-            merge_result: 融合结果
-        """
-        if self._event_emitter:
-            await self._event_emitter.emit_custom(
-                run_id=run_id,
-                event_name=SearchEventType.RRF_RESULT.value,
-                data={
-                    "inputPaths": merge_result.input_paths,
-                    "outputCount": merge_result.output_count,
-                    "significantRankChanges": [
-                        {
-                            "docId": rc["doc_id"],
-                            "beforeRank": rc["before_rank"],
-                            "afterRank": rc["after_rank"],
-                            "change": rc["before_rank"] - rc["after_rank"]
-                        }
-                        for rc in merge_result.rank_changes
-                        if abs(rc["before_rank"] - rc["after_rank"]) >= 3
-                    ][:10]  # 只展示显著变化
-                }
-            )
-
-    async def emit_rerank_comparison(
-        self,
-        run_id: str,
-        comparisons: list[RerankComparison]
-    ) -> None:
-        """
-        发射 Rerank 前后对比事件
-
-        Args:
-            run_id: 当前运行 ID
-            comparisons: 对比列表
-        """
-        if self._event_emitter:
-            await self._event_emitter.emit_custom(
-                run_id=run_id,
-                event_name=SearchEventType.RERANK_RESULT.value,
-                data={
-                    "comparisons": [
-                        {
-                            "docId": c.doc_id,
-                            "preview": c.content_preview[:100],
-                            "l0Score": round(c.l0_score, 4),
-                            "l1Score": round(c.l1_score, 4),
-                            "rankBefore": c.rank_before,
-                            "rankAfter": c.rank_after,
-                            "improved": c.rank_after < c.rank_before
-                        }
-                        for c in comparisons[:20]  # 只展示 Top 20
-                    ],
-                    "avgScoreImprovement": sum(
-                        c.l1_score - c.l0_score for c in comparisons
-                    ) / len(comparisons) if comparisons else 0
-                }
-            )
-
-    async def emit_search_finished(
-        self,
-        run_id: str,
-        result_count: int,
-        total_latency_ms: float
-    ) -> None:
-        """
-        发射检索完成事件
-
-        Args:
-            run_id: 当前运行 ID
-            result_count: 结果数量
-            total_latency_ms: 总延迟
-        """
-        if self._event_emitter:
-            await self._event_emitter.emit_step_finished(
-                run_id=run_id,
-                step_name="perception_search",
-                data={
-                    "resultCount": result_count,
-                    "totalLatencyMs": round(total_latency_ms, 2)
-                }
-            )
-
-    def generate_citations(
-        self,
-        search_results: list[dict]
-    ) -> list[SourceCitation]:
-        """
-        生成引用来源列表
-
-        用于在 Agent 响应中标注信息来源
-
-        Args:
-            search_results: 检索结果
-
-        Returns:
-            引用来源列表
-        """
-        citations = []
-        for i, result in enumerate(search_results, 1):
-            citation = SourceCitation(
-                doc_id=result.get("id", f"doc_{i}"),
-                source_type=result.get("source_type", "document"),
-                title=result.get("title", f"Source {i}"),
-                url=result.get("url"),
-                snippet=result.get("content", "")[:200],
-                relevance_score=result.get("score", 0.0)
-            )
-            citations.append(citation)
-        return citations
-
-    async def emit_citations(
-        self,
-        run_id: str,
-        citations: list[SourceCitation]
-    ) -> None:
-        """
-        发射引用来源事件
-
-        Args:
-            run_id: 当前运行 ID
-            citations: 引用来源列表
-        """
-        if self._event_emitter:
-            await self._event_emitter.emit_custom(
-                run_id=run_id,
-                event_name=SearchEventType.SOURCE_CITATION.value,
-                data={
-                    "citations": [
-                        {
-                            "id": c.doc_id,
-                            "type": c.source_type,
-                            "title": c.title,
-                            "url": c.url,
-                            "snippet": c.snippet,
-                            "score": round(c.relevance_score, 4)
-                        }
-                        for c in citations
-                    ]
-                }
-            )
+    async def emit_citations(self, run_id: str, citations: list[SourceCitation]) -> None:
+        """发射 CUSTOM (source_citation) 事件"""
+        ...
 ```
 
 #### 4.4.4 前端展示组件规范
@@ -1777,12 +1232,12 @@ class SearchVisualizer:
 
 | 任务 ID | 任务描述                   | 状态      | 验收标准         |
 | :------ | :------------------------- | :-------- | :--------------- |
-| P3-4-1  | 实现 `SearchVisualizer` 类 | 🔲 待开始 | 6 种事件类型支持 |
-| P3-4-2  | 实现多路召回详情发射       | 🔲 待开始 | 三路召回数据完整 |
-| P3-4-3  | 实现 RRF 融合可视化        | 🔲 待开始 | 排名变化可追溯   |
-| P3-4-4  | 实现 Rerank 对比发射       | 🔲 待开始 | 分数变化正确     |
-| P3-4-5  | 实现引用来源生成           | 🔲 待开始 | 来源信息完整     |
-| P3-4-6  | 编写可视化接口测试         | 🔲 待开始 | 覆盖率 > 80%     |
+| P3-4-1  | 实现 `SearchVisualizer` 类 | ✅ 已完成 | 6 种事件类型支持 |
+| P3-4-2  | 实现多路召回详情发射       | ✅ 已完成 | 三路召回数据完整 |
+| P3-4-3  | 实现 RRF 融合可视化        | ✅ 已完成 | 排名变化可追溯   |
+| P3-4-4  | 实现 Rerank 对比发射       | ✅ 已完成 | 分数变化正确     |
+| P3-4-5  | 实现引用来源生成           | ✅ 已完成 | 来源信息完整     |
+| P3-4-6  | 编写可视化接口测试         | 🔲 进行中 | 覆盖率 > 80%     |
 
 #### 4.4.6 验收标准
 
