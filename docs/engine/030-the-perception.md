@@ -1237,7 +1237,7 @@ class SearchVisualizer:
 | P3-4-3  | 实现 RRF 融合可视化        | ✅ 已完成 | 排名变化可追溯   |
 | P3-4-4  | 实现 Rerank 对比发射       | ✅ 已完成 | 分数变化正确     |
 | P3-4-5  | 实现引用来源生成           | ✅ 已完成 | 来源信息完整     |
-| P3-4-6  | 编写可视化接口测试         | 🔲 进行中 | 覆盖率 > 80%     |
+| P3-4-6  | 编写可视化接口测试         | ✅ 已完成 | 覆盖率 > 80%     |
 
 #### 4.4.6 验收标准
 
@@ -1260,12 +1260,12 @@ class SearchVisualizer:
 
 | 任务 ID    | 任务描述           | 里程碑         | 状态      | 验收标准                  |
 | :--------- | :----------------- | :------------- | :-------- | :------------------------ |
-| **P3-5-1** | 文档摄入服务实现   | M1: Ingestion  | 🔲 待开始 | 支持 MD/TXT/PDF 格式解析  |
-| **P3-5-2** | Chunking 策略实现  | M1: Ingestion  | 🔲 待开始 | 四种策略测试通过          |
-| **P3-5-3** | Embedding 服务实现 | M1: Ingestion  | 🔲 待开始 | Mock/OpenAI 两种 Provider |
-| **P3-5-4** | RAG Pipeline 实现  | M2: Pipeline   | 🔲 待开始 | E2E 查询流程通过          |
+| **P3-5-1** | 文档摄入服务实现   | M1: Ingestion  | ✅ 已完成 | 支持 MD/TXT/PDF 格式解析  |
+| **P3-5-2** | Chunking 策略实现  | M1: Ingestion  | ✅ 已完成 | 四种策略测试通过          |
+| **P3-5-3** | Embedding 服务实现 | M1: Ingestion  | ✅ 已完成 | Mock/OpenAI 两种 Provider |
+| **P3-5-4** | RAG Pipeline 实现  | M2: Pipeline   | ✅ 已完成 | E2E 查询流程通过          |
 | **P3-5-5** | 索引预热脚本       | M2: Pipeline   | 🔲 待开始 | 100K 文档 < 5min          |
-| **P3-5-6** | RAG E2E 测试       | M3: Validation | 🔲 待开始 | 覆盖率 > 80%              |
+| **P3-5-6** | RAG E2E 测试       | M3: Validation | ✅ 已完成 | 覆盖率 > 80%              |
 
 #### 4.5.2 关键里程碑
 
@@ -1276,16 +1276,16 @@ gantt
     axisFormat %d
 
     section M1: Ingestion
-    P3-5-1 文档摄入 :a1, 01, 2d
-    P3-5-2 Chunking :a2, after a1, 2d
-    P3-5-3 Embedding :a3, after a2, 1d
+    P3-5-1 文档摄入 :done, a1, 01, 2d
+    P3-5-2 Chunking :done, a2, after a1, 2d
+    P3-5-3 Embedding :done, a3, after a2, 1d
 
     section M2: Pipeline
-    P3-5-4 RAG Pipeline :b1, after a3, 2d
+    P3-5-4 RAG Pipeline :done, b1, after a3, 2d
     P3-5-5 索引预热 :b2, after b1, 1d
 
     section M3: Validation
-    P3-5-6 E2E 测试 :c1, after b2, 2d
+    P3-5-6 E2E 测试 :done, c1, after b2, 2d
 ```
 
 #### 4.5.3 任务详解
@@ -1294,35 +1294,41 @@ gantt
 
 **目标**：实现多格式文档解析与摄入
 
-**实现文件**：`src/cognizes/engine/perception/ingestion.py`
+**实现文件**：[src/cognizes/engine/perception/ingestion.py](../../src/cognizes/engine/perception/ingestion.py)
 
-**关键代码**：
+**关键接口**：
 
 ```python
 class DocumentIngester:
+    """High-level Document Ingestion Service."""
+
     def __init__(
         self,
         chunker=None,
         embedder=None,
         parsers: Optional[List[DocumentParser]] = None,
-    ):
-        """初始化文档摄入器"""
+    ): ...
 
-    def ingest_text(
+    async def ingest_text(
         self,
         content: str,
         source_uri: str = "inline.txt",
         generate_embeddings: bool = True,
-    ) -> IngestedDocument:
-        """摄入文本内容"""
+    ) -> IngestedDocument: ...
+
+    async def ingest_file(
+        self,
+        file_path: Union[str, Path],
+        generate_embeddings: bool = True,
+    ) -> IngestedDocument: ...
 ```
 
 **验收检查**：
 
-- [ ] MarkdownParser 解析测试通过
-- [ ] TextParser 解析测试通过
-- [ ] PDFParser 解析测试通过（可选依赖）
-- [ ] 元数据抽取正确
+- [x] MarkdownParser 解析测试通过
+- [x] TextParser 解析测试通过
+- [x] PDFParser 解析测试通过（可选依赖）
+- [x] 元数据抽取正确
 
 ---
 
