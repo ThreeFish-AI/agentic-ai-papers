@@ -55,6 +55,86 @@ class EmbeddingProvider(ABC):
         ...
 
 
+class GeminiEmbeddingProvider(EmbeddingProvider):
+    """
+    Google Gemini Embedding Provider.
+
+    Supports:
+    - models/text-embedding-004 (768 dims)
+    """
+
+    MODEL_DIMENSIONS = {
+        "models/text-embedding-004": 768,
+    }
+
+    def __init__(
+        self,
+        model: str = "models/text-embedding-004",
+        api_key: Optional[str] = None,
+        batch_size: int = 100,
+    ):
+        self._model = model
+        self._api_key = api_key
+        self._batch_size = batch_size
+        self._configure_genai()
+
+    def _configure_genai(self):
+        """Lazy load and configure Google GenAI."""
+        try:
+            import google.generativeai as genai
+            import os
+
+            api_key = self._api_key or os.getenv("GOOGLE_API_KEY")
+            if not api_key:
+                raise ValueError("GOOGLE_API_KEY is required for GeminiEmbeddingProvider.")
+
+            genai.configure(api_key=api_key)
+            self._genai = genai
+        except ImportError:
+            raise ImportError(
+                "google-generativeai is required for GeminiEmbeddingProvider. "
+                "Install with: pip install google-generativeai"
+            )
+
+    @property
+    def model_name(self) -> str:
+        return self._model
+
+    @property
+    def dimensions(self) -> int:
+        return self.MODEL_DIMENSIONS.get(self._model, 768)
+
+    async def embed(self, texts: List[str]) -> List[List[float]]:
+        """Generate embeddings using Gemini API."""
+        all_embeddings = []
+
+        # Process in batches
+        for i in range(0, len(texts), self._batch_size):
+            batch = texts[i : i + self._batch_size]
+
+            # Run in executor because genai library might be synchronous for some calls
+            # or we want to offload the network wait if it's not native async
+            # The current google-generativeai python client supports async methods but
+            # let's assume standard usage for now. Actually, let's use the embed_content method.
+
+            # Using async wrapper if available, or run_in_executor
+            loop = asyncio.get_event_loop()
+
+            def _call_gemini():
+                return [
+                    self._genai.embed_content(
+                        model=self._model,
+                        content=text,
+                    )["embedding"]
+                    for text in batch
+                ]
+
+            batch_embeddings = await loop.run_in_executor(None, _call_gemini)
+            all_embeddings.extend(batch_embeddings)
+
+        return all_embeddings
+
+
 class OpenAIEmbeddingProvider(EmbeddingProvider):
     """
     OpenAI Embedding Provider.
@@ -262,6 +342,7 @@ class Embedder:
         """Create embedding provider based on type."""
         providers = {
             "openai": OpenAIEmbeddingProvider,
+            "gemini": GeminiEmbeddingProvider,
             "sentence-transformers": SentenceTransformerProvider,
             "mock": MockEmbeddingProvider,
         }
@@ -359,7 +440,7 @@ def get_embedder(
     Factory function to create an Embedder.
 
     Args:
-        provider_type: One of "openai", "sentence-transformers", "mock"
+        provider_type: One of "openai", "gemini", "sentence-transformers", "mock"
         model_name: Model name (defaults based on provider)
         **kwargs: Provider-specific arguments
 
@@ -368,6 +449,7 @@ def get_embedder(
     """
     default_models = {
         "openai": "text-embedding-3-small",
+        "gemini": "models/text-embedding-004",
         "sentence-transformers": "all-MiniLM-L6-v2",
         "mock": "mock-embedding-model",
     }
