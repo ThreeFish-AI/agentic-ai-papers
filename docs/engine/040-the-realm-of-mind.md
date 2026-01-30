@@ -1519,21 +1519,76 @@ asyncio.run(test_postgres_tracing())
 
 ## 6. 验收基准
 
-| 模块               | 文件/目录                                                 | 描述                  |
-| :----------------- | :-------------------------------------------------------- | :-------------------- |
-| **技术文档**       | `docs/040-the-realm-of-mind.md`                           | 本文档                |
-| **Python Package** | `src/cognizes/adapters/postgres/`                         | ADK PostgreSQL 适配器 |
-| **SessionService** | `src/cognizes/adapters/postgres/session_service.py`       | PostgreSQL 会话服务   |
-| **MemoryService**  | `src/cognizes/adapters/postgres/memory_service.py`        | PostgreSQL 记忆服务   |
-| **Tool Registry**  | `src/cognizes/adapters/postgres/tool_registry.py`         | 动态工具注册表        |
-| **AgentExecutor**  | `src/cognizes/engine/mind/agent_executor.py`              | Agent 执行编排器      |
-| **Tracing**        | `src/cognizes/adapters/postgres/tracing.py`               | OpenTelemetry 集成    |
-| **Sandbox**        | `src/cognizes/adapters/postgres/sandbox/docker_runner.py` | Docker 沙箱实现       |
-| **Schema**         | `src/cognizes/engine/schema/mind_schema.sql`              | Phase 4 Schema 扩展   |
+> [!IMPORTANT]
+>
+> **对标 Roadmap KPI**：以下验收标准直接对标 `000-roadmap.md` 中 Pillar IV 的核心核验指标："Stateful Agent Execution - 会话状态持久化与主动执行能力"。
+
+### 6.1 功能验收
+
+#### 6.1.1 核心服务能力
+
+| 验收项                 | 验收标准                                         | 任务 ID | 对标 Roadmap         |
+| :--------------------- | :----------------------------------------------- | :------ | :------------------- |
+| **Session Service**    | `create/get/list/delete` 完整接口契约实现        | P4-2-1  | Stateful Session     |
+| **Memory Integration** | 会话自动 consolidation 到长期记忆                | P4-2-9  | Long-term Memory     |
+| **Event Stream**       | 支持 User/Agent/Tool/System 多种事件类型流式传输 | P4-2-4  | Event-Driven Runtime |
+| **State Persistence**  | `user:`/`app:` 前缀状态跨会话持久化              | P4-2-7  | Context Management   |
+| **Tool Execution**     | `ToolRegistry` 支持动态注册与热更新              | P4-2-13 | Tool Administration  |
+
+#### 6.1.2 增强能力 (Advanced Capabilities)
+
+| 验收项                | 验收标准                                        | 任务 ID | 对标 Roadmap            |
+| :-------------------- | :---------------------------------------------- | :------ | :---------------------- |
+| **Sandbox Runtime**   | 恶意代码 (`os.system`) 被有效拦截               | P4-4-5  | Secure Execution        |
+| **OpenTelemetry**     | Trace 数据双重导出 (Postgres + OTLP)            | P4-4-1  | Full Observability      |
+| **AG-UI Protocol**    | 发射标准的 16 种 AG-UI 事件 (Thinking/Steps)    | P4-5-4  | Glass-Box Visualization |
+| **Human-in-the-Loop** | 关键操作 (`requires_confirmation`) 触发审批流程 | P4-5-7  | Human Agency            |
+
+### 6.2 性能验收
+
+| 验收项              | 基准目标 (PASS)      | 优化目标 (EXCELLENT) | 验证方式                 |
+| :------------------ | :------------------- | :------------------- | :----------------------- |
+| **Session Latency** | P99 < 50ms (Create)  | P99 < 30ms (Create)  | `locust` 压测            |
+| **Event Append**    | P99 < 20ms           | P99 < 10ms           | `locust` 压测            |
+| **Memory Recall**   | P99 < 100ms (Hybrid) | P99 < 50ms (Hybrid)  | `test_memory_service.py` |
+| **Sandbox Boot**    | < 2s (Cold Start)    | < 500ms (Warm)       | `test_sandbox.py`        |
+
+### 6.3 交付物清单
+
+| 类别       | 文件路径                                                        | 描述                                  | 任务 ID         |
+| :--------- | :-------------------------------------------------------------- | :------------------------------------ | :-------------- |
+| **文档**   | `docs/engine/040-the-realm-of-mind.md`                          | 本实施方案文档                        | P4-1-1          |
+| **Schema** | `src/cognizes/engine/schema/mind_schema.sql`                    | Mind Schema (Tools, Sandbox, Tracing) | P4-1-3          |
+| **Python** | `src/cognizes/adapters/postgres/session_service.py`             | PostgreSQL Session Service 实现       | P4-2-2          |
+| **Python** | `src/cognizes/adapters/postgres/memory_service.py`              | PostgreSQL Memory Service 实现        | P4-2-9          |
+| **Python** | `src/cognizes/adapters/postgres/tool_registry.py`               | 动态工具注册表 (含 AG-UI 扩展)        | P4-2-13, P4-5-5 |
+| **Python** | `src/cognizes/adapters/postgres/tracing.py`                     | OpenTelemetry 双路导出器              | P4-4-2          |
+| **Python** | `src/cognizes/adapters/postgres/sandbox/microsandbox_runner.py` | Microsandbox 运行时实现 (Default)     | P4-4-8          |
+| **Python** | `src/cognizes/adapters/postgres/sandbox/base.py`                | 沙箱抽象基类与工厂                    | P4-4-7          |
+| **Python** | `src/cognizes/engine/mind/agent_executor.py`                    | Agent 主动执行编排器                  | P4-3-X          |
+| **Python** | `src/cognizes/engine/mind/thinking_visualizer.py`               | 思维链可视化发射器                    | P4-5-4          |
+| **Python** | `src/cognizes/engine/agui/event_emitter.py`                     | AG-UI 协议事件适配器                  | P4-5-4          |
+| **Tests**  | `tests/integration/mind/test_adk_llmagent.py`                   | ADK 集成验证脚本                      | P4-3-5          |
+| **Tests**  | `tests/integration/mind/test_e2e.py`                            | 端到端对话流程测试                    | P4-3-5          |
+| **Tests**  | `tests/unittests/mind/test_session_service.py`                  | Session Service 单元测试              | P4-2-8          |
 
 ---
 
 ## 7. 风险与缓解策略
+
+| 风险类别        | 风险描述 (Risk)              | 影响 (Impact)             | 缓解策略 (Mitigation)                                                                                         |   状态    |
+| :-------------- | :--------------------------- | :------------------------ | :------------------------------------------------------------------------------------------------------------ | :-------: |
+| **Security**    | 沙箱逃逸或恶意代码执行       | 服务器被入侵，数据泄露    | 1. 采用 MicroVM (microsandbox) 强隔离<br>2. `execute_safe` 静态分析拦截<br>3. 限制网络与文件访问              |    ✅     |
+| **Consistency** | 并发 Tool Call 导致状态覆盖  | Session State 数据不一致  | 1. 数据库级 OCC (Optimistic Concurrency Control)<br>2. `version` 字段校验<br>3. 事务隔离级别设为 Serializable |    ✅     |
+| **Stability**   | Agent 进入无限 ReAct 循环    | 消耗大量 tokens，任务卡死 | 1. 设置 `max_steps` 硬限制 (Default=10)<br>2. 全局超时控制 (Timeout)<br>3. 成本/步数监控熔断                  |    ✅     |
+| **Latency**     | 复杂 Tool 链调用导致响应过慢 | P99 延迟不可控            | 1. 异步工具执行 (`async/await`)<br>2. 状态流式更新 (`STATE_DELTA`)<br>3. 慢工具后台执行模式                   |    🚧     |
+| **Privacy**     | 敏感数据泄露到 Trace 日志    | PII 数据泄露              | 1. TraceExporter 层级 PII 过滤<br>2. 敏感工具参数 (如 API Key) 自动 Masking                                   | 🟡 **P5** |
+
+### 7.1 剩余遗留问题 (Known Issues)
+
+- [ ] **沙箱冷启动延迟**：虽优化至 200ms，但在高并发下 microVM 启动开销仍不可忽视，Phase 5 需引入 "Sandbox Pool" 预热机制。
+- [ ] **复杂状态冲突**：当前 OCC 策略在冲突时直接失败重试，对于高频写场景可能导致长尾延迟，需探索 CRDTs (Conflict-Free Replicated Data Types) 方案。
+- [ ] **工具动态加载**：当前 `ToolRegistry` 依赖 Python 进程重启加载部分本地代码，需进一步完善基于 WASM 的插件化热加载机制。
 
 ## 8. 参考资料
 
