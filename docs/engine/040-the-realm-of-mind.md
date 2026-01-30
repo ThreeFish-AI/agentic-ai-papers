@@ -27,7 +27,7 @@ tags:
 
 ## 1. 执行摘要
 
-### 1.1 Phase 4 定位与目标
+### 1.1 定位与目标 (Phase 4)
 
 **Phase 4: The Realm of Mind** 是整个验证计划的**集成核心阶段**，对标人类大脑的**前额叶皮层 (Prefrontal Cortex)** —— 负责执行控制、计划决策与工具调度的中枢。
 
@@ -79,7 +79,7 @@ graph LR
 
 > [!IMPORTANT]
 >
-> **对标 Roadmap Pillar IV**：The Realm of Mind 的核心价值是将 Google Vertex AI Agent Engine 的黑盒能力转化为完全透明的白盒实现。
+> **核心价值**：Phase 4 将 Google Vertex AI Agent Engine 的黑盒托管能力，解构为完全透明、可调试、可掌控的 **Glass-Box Implementation**。
 
 | 维度           | Black-Box (Google Vertex AI)           | Glass-Box (Open Agent Engine) |
 | :------------- | :------------------------------------- | :---------------------------- |
@@ -89,174 +89,114 @@ graph LR
 | **运维成本**   | Serverless (Managed)                   | Self-hosted / 多地多活        |
 | **供应商锁定** | 强依赖 GCP                             | Vendor Agnostic               |
 
-#### 1.2.2 ADK Service 接口架构
+#### 1.2.2 ADK Service 接口适配
+
+本方案采用 **Adapter Pattern**，将 Cognizes Engine 的底层能力（Pulse, Hippocampus）映射为 Google ADK 的标准接口。
 
 ```mermaid
 graph TB
-    subgraph "ADK Framework Layer"
-        R[Runner<br>Event Loop 协调器]
-        A[LlmAgent<br>推理核心]
+    subgraph ADK ["Google ADK Framework"]
+        direction TB
+        Runner[Agent Runner<br>Event Loop]
+        Agent[GenAI Agent<br>Probabilistic Logic]
     end
 
-    subgraph "Service Interface Layer"
-        SS[SessionService<br>会话管理接口]
-        MS[MemoryService<br>长期记忆接口]
-        AS[ArtifactService<br>文件管理接口]
+    subgraph Interfaces ["Service Interface Layer (Abstract)"]
+        direction TB
+        SS[SessionService]
+        MS[MemoryService]
     end
 
-    subgraph "Open Agent Engine (Our Implementation)"
-        PSS[PostgresSessionService]
-        PMS[PostgresMemoryService]
-        PAS[PostgresArtifactService]
+    subgraph Implementation ["Open Agent Engine (Adapters)"]
+        direction TB
+        PSS[PostgresSessionService<br>The Pulse Adapter]
+        PMS[PostgresMemoryService<br>The Hippocampus Adapter]
     end
 
-    R --> SS & MS & AS
-    A --> R
+    Agent --> Runner
+    Runner --> SS & MS
+
     SS -.-> PSS
     MS -.-> PMS
-    AS -.-> PAS
 
-    style R fill:#4285f4,color:#fff
-    style PSS fill:#34a853,color:#fff
-    style PMS fill:#34a853,color:#fff
+    PSS -.-> Pulse[(The Pulse<br>Postgres DB)]
+    PMS -.-> Hippo[(The Hippocampus<br>Postgres DB)]
+
+    style ADK fill:#1e293b,stroke:#475569,color:#fff
+    style Interfaces fill:#334155,stroke:#64748b,stroke-dasharray: 5 5,color:#fff
+    style Implementation fill:#0f172a,stroke:#3b82f6,stroke-width:2px,color:#fff
+    style PSS fill:#1e40af,stroke:#60a5fa,color:#fff
+    style PMS fill:#1e40af,stroke:#60a5fa,color:#fff
+    style Pulse fill:#064e3b,stroke:#34d399,color:#fff
+    style Hippo fill:#064e3b,stroke:#34d399,color:#fff
 ```
 
-### 1.3 任务-章节对照表
+### 1.3 执行导图 (Execution Map)
+
+#### 1.3.1 任务-文档锚定
 
 > [!NOTE]
 >
-> 以下表格将 [001-task-checklist.md](./001-task-checklist.md) 的任务 ID 与本文档章节进行对照，便于追踪执行进度。
+> 本矩阵建立了 **Planning (任务)**、**Navigation (文档)** 与 **Delivery (产物)** 的三维映射。
 
-| 任务模块             | 任务 ID 范围      | 对应章节                                                             |
-| :------------------- | :---------------- | :------------------------------------------------------------------- |
-| ADK Adapter 调研     | P4-1-1 ~ P4-1-5   | [2. 技术调研](#2-技术调研adk-runtime-深度分析)                       |
-| PostgresSession 实现 | P4-2-1 ~ P4-2-8   | [4.1 PostgresSessionService](#41-step-1-postgressessionservice-实现) |
-| PostgresMemory 实现  | P4-2-9 ~ P4-2-12  | [4.2 PostgresMemoryService](#42-step-2-postgresmemoryservice-实现)   |
-| Tool Registry 实现   | P4-2-13 ~ P4-2-18 | [4.3 Tool Registry](#43-step-3-tool-registry-实现)                   |
-| Orchestration Loop   | P4-2-19 ~ P4-2-23 | [4.4 AgentExecutor](#44-step-4-agentexecutor-实现)                   |
-| 单元测试与集成测试   | P4-3-1 ~ P4-3-4   | [4.5 测试实现](#45-step-5-测试实现)                                  |
-| Glass-Box Tracing    | P4-4-1 ~ P4-4-4   | [4.6 OpenTelemetry 集成](#46-step-6-opentelemetry-集成)              |
-| Sandboxed Execution  | P4-4-5 ~ P4-4-10  | [4.7 安全沙箱](#47-step-7-sandboxed-execution-实现)                  |
-| 可视化验证           | P4-4-11 ~ P4-4-13 | [4.8 可视化验证](#48-step-8-可视化验证)                              |
-| **AG-UI 协议集成**   | P4-5-1 ~ P4-5-10  | [4.9 AG-UI 协议集成](#49-step-9-ag-ui-协议集成)                      |
-| 验收与文档           | P4-6-1 ~ P4-6-4   | [5. 验收标准](#5-验收标准) + [6. 交付物](#6-交付物清单)              |
+| 任务模块 (Module)    | 任务 ID (Range)   | 预估工期 | 交付物 (Deliverables)    | 对应章节 (Navigation)                                        |
+| :------------------- | :---------------- | :------- | :----------------------- | :----------------------------------------------------------- |
+| **1. ADK 调研**      | P4-1-1 ~ P4-1-5   | 0.25 Day | 接口分析笔记 + 时序图    | [2. 技术调研](#2-技术调研adk-runtime-深度分析)               |
+| **2. Session 适配**  | P4-2-1 ~ P4-2-8   | 0.50 Day | `PostgresSessionService` | [4.1 SessionService](#41-step-1-postgressessionservice-实现) |
+| **3. Memory 适配**   | P4-2-9 ~ P4-2-12  | 0.25 Day | `PostgresMemoryService`  | [4.2 MemoryService](#42-step-2-postgresmemoryservice-实现)   |
+| **4. Tool Registry** | P4-2-13 ~ P4-2-18 | 0.25 Day | `ToolRegistry` + Schema  | [4.3 Tool Registry](#43-step-3-tool-registry-实现)           |
+| **5. Runtime Loop**  | P4-2-19 ~ P4-2-23 | 0.25 Day | `AgentExecutor`          | [4.4 AgentExecutor](#44-step-4-agentexecutor-实现)           |
+| **6. Testing**       | P4-3-1 ~ P4-3-4   | 0.50 Day | 测试套件 + 技术文档      | [4.5 测试实现](#45-step-5-测试实现)                          |
+| **7. Tracing**       | P4-4-1 ~ P4-4-4   | 0.25 Day | OpenTelemetry 集成       | [4.6 OpenTelemetry](#46-step-6-opentelemetry-集成)           |
+| **8. Sandbox**       | P4-4-5 ~ P4-4-10  | 0.25 Day | 安全隔离环境             | [4.7 安全沙箱](#47-step-7-sandboxed-execution-实现)          |
+| **9. Validation**    | P4-4-11 ~ P4-4-13 | 0.25 Day | 可视化 Trace 验证        | [4.8 可视化验证](#48-step-8-可视化验证)                      |
+| **10. UI Protocol**  | P4-5-1 ~ P4-5-10  | 0.50 Day | AG-UI Protocol Adapter   | [4.9 AG-UI 协议](#49-step-9-ag-ui-协议集成)                  |
 
-### 1.4 工期规划
+#### 1.3.2 实施甘特图 (Gantt Chart)
 
-| 阶段 | 任务模块           | 任务 ID           | 预估工期 | 交付物                          |
-| :--- | :----------------- | :---------------- | :------- | :------------------------------ |
-| 4.1  | ADK 调研           | P4-1-1 ~ P4-1-5   | 0.25 Day | 接口分析笔记 + 时序图           |
-| 4.2  | PostgresSession    | P4-2-1 ~ P4-2-8   | 0.5 Day  | `postgres_session_service.py`   |
-| 4.3  | PostgresMemory     | P4-2-9 ~ P4-2-12  | 0.25 Day | `postgres_memory_service.py`    |
-| 4.4  | Tool Registry      | P4-2-13 ~ P4-2-18 | 0.25 Day | `tool_registry.py` + Schema     |
-| 4.5  | AgentExecutor      | P4-2-19 ~ P4-2-23 | 0.25 Day | `agent_executor.py`             |
-| 4.6  | OpenTelemetry 集成 | P4-4-1 ~ P4-4-4   | 0.25 Day | `tracing.py` + Langfuse 集成    |
-| 4.7  | 安全沙箱           | P4-4-5 ~ P4-4-10  | 0.25 Day | `sandbox_runner.py`             |
-| 4.8  | 可视化验证         | P4-4-11 ~ P4-4-13 | 0.25 Day | Langfuse 可视化验证             |
-| 4.9  | AG-UI 协议集成     | P4-5-1 ~ P4-5-10  | 0.5 Day  | `event_emitter.py` + CopilotKit |
-| 4.10 | 测试与验收         | P4-6-1 ~ P4-6-4   | 0.5 Day  | 测试套件 + 技术文档             |
+```mermaid
+gantt
+    title Phase 4 Execution Timeline (Total: ~3.5 Days)
+    dateFormat  XA
+    axisFormat  Day %d
+
+    section Foundation & Pulse
+    ADK Audit & Design       :active, t1, 0, 2h
+    PostgresSession Impl     :t2, after t1, 4h
+
+    section Hippocampus
+    PostgresMemory Impl      :t3, after t2, 2h
+
+    section Mind Runtime
+    Tool Registry            :t4, after t3, 2h
+    AgentExecutor Loop       :t5, after t4, 2h
+    Unit & Integ Testing     :t6, after t5, 4h
+
+    section Observability
+    OpenTelemetry Tracing    :t7, after t6, 2h
+    Glass-Box Validation     :t8, after t7, 2h
+
+    section Safety & UI
+    Sandbox Isolation        :t9, after t8, 2h
+    AG-UI Integration        :t10, after t9, 4h
+    Final Acceptance         :t11, after t10, 2h
+```
 
 ---
 
 ## 2. 核心参考模型：ADK Runtime
 
-### 2.1 ADK SessionService 接口契约
+本章旨在确立 **Golden Standard (基准规范)**。通过解构 Google ADK 的抽象接口，明确 Pillar I (Pulse) 与 Pillar II (Hippocampus) 在代码层面的标准化契约。
 
-基于 ADK 源码分析 (对标 `google/adk-python` [base_session_service.py](https://github.com/google/adk-python/blob/main/src/google/adk/sessions/base_session_service.py))，`BaseSessionService` 抽象接口定义如下：
+### 2.1 契约定义：SessionService
+
+`SessionService` (对标 `google/adk-python` [base_session_service.py](https://github.com/google/adk-python/blob/main/src/google/adk/sessions/base_session_service.py)) 是 **The Pulse (脉搏系统)** 的运行时接口。它不仅负责 Session 的 CRUD，还通过 `append_event` 方法承载了 **状态流转 (State Transitions)** 的核心逻辑。
 
 > [!IMPORTANT]
 >
 > **关键发现**：`append_event()` **不是抽象方法**，基类提供了默认实现来处理 `temp:` 前缀过滤和 State 更新。子类只需覆写 CRUD 方法。
-
-```python
-from abc import ABC, abstractmethod
-from typing import Optional, Any
-from pydantic import BaseModel, Field
-from google.adk.sessions import Session
-from google.adk.events import Event
-
-# ADK 官方配置类
-class GetSessionConfig(BaseModel):
-    """获取会话的配置选项"""
-    num_recent_events: Optional[int] = None   # 仅获取最近 N 条事件
-    after_timestamp: Optional[float] = None   # 仅获取该时间戳之后的事件
-
-class ListSessionsResponse(BaseModel):
-    """列出会话的响应"""
-    sessions: list[Session] = Field(default_factory=list)
-
-class BaseSessionService(ABC):
-    """Session 管理服务抽象基类"""
-
-    @abstractmethod
-    async def create_session(
-        self,
-        *,
-        app_name: str,
-        user_id: str,
-        state: Optional[dict[str, Any]] = None,  # 官方顺序：state 在 session_id 之前
-        session_id: Optional[str] = None,
-    ) -> Session:
-        """创建新会话"""
-
-    @abstractmethod
-    async def get_session(
-        self,
-        *,
-        app_name: str,
-        user_id: str,
-        session_id: str,
-        config: Optional[GetSessionConfig] = None,  # 官方新增：支持分页/过滤
-    ) -> Optional[Session]:
-        """获取会话"""
-
-    @abstractmethod
-    async def list_sessions(
-        self,
-        *,
-        app_name: str,
-        user_id: Optional[str] = None,  # 官方支持：user_id 可选 (列出所有用户)
-    ) -> ListSessionsResponse:           # 官方返回类型
-        """列出会话"""
-
-    @abstractmethod
-    async def delete_session(
-        self,
-        *,
-        app_name: str,
-        user_id: str,
-        session_id: str
-    ) -> None:
-        """删除会话"""
-
-    # 注意：append_event 不是抽象方法，基类提供默认实现
-    async def append_event(self, session: Session, event: Event) -> Event:
-        """追加事件到会话 (基类默认实现)"""
-        if event.partial:
-            return event
-        event = self._trim_temp_delta_state(event)  # 过滤 temp: 前缀
-        self._update_session_state(session, event)  # 更新 session.state
-        session.events.append(event)
-        return event
-
-    def _trim_temp_delta_state(self, event: Event) -> Event:
-        """移除 temp: 前缀的 state_delta (不持久化)"""
-        if not event.actions or not event.actions.state_delta:
-            return event
-        event.actions.state_delta = {
-            k: v for k, v in event.actions.state_delta.items()
-            if not k.startswith('temp:')
-        }
-        return event
-
-    def _update_session_state(self, session: Session, event: Event) -> None:
-        """根据 event 更新 session.state"""
-        if not event.actions or not event.actions.state_delta:
-            return
-        for key, value in event.actions.state_delta.items():
-            if not key.startswith('temp:'):
-                session.state[key] = value
-```
+>
+> 这种设计模式确保了所有 adapter (如 InMemory, Firestore, Postgres) 共享完全一致的 **State Transition Logic**，防止因实现差异导致的行为不一致。`SessionService` 在此扮演了 **Boundary Object** 的角色，定义了 Pulse 与外部存储交互的唯一合法途径。
 
 #### 2.1.1 Session 数据结构
 
