@@ -19,41 +19,58 @@ tags:
 
 > [!NOTE]
 >
-> **文档定位**：本文档是 [000-roadmap.md](./000-roadmap.md) Phase 4 的详细工程实施方案，用于指导「**The Realm of Mind (心智空间)**」的完整落地验证工作。涵盖技术调研、架构设计、代码实现、测试验证等全流程。
+> **文档定位**：本文档是 [000-roadmap.md](./000-roadmap.md) Phase 4 的详细工程实施方案，旨在指导 Pillar IV「**The Realm of Mind (心智空间)**」的落地与白盒化验证。内容涵盖技术调研、架构设计、代码实现及全链路测试。
 >
-> **前置依赖**：本阶段依赖 Phase 1-3 的完成，需复用其统一存储基座 (Unified Schema)、记忆管理能力 (Memory Consolidation) 和融合检索能力 (Fusion Retrieval)。
+> **前置依赖**：本阶段构建于 Phase 1-3 的基座之上，复用其 **Unified Schema** ([The Pulse](./010-the-pulse.md))、**Memory Consolidation** ([The Hippocampus](./020-the-hippocampus.md)) 与 **Fusion Retrieval** ([The Perception](./030-the-perception.md)) 能力。
 
 ---
 
-## 1. 执行概览
+## 1. 执行摘要
 
 ### 1.1 Phase 4 定位与目标
 
-**Phase 4: The Realm of Mind** 是整个验证计划的**集成核心阶段**，对标人类大脑的**前额叶皮层 (Prefrontal Cortex)** —— 负责执行控制、计划和决策的中枢。核心目标是：
+**Phase 4: The Realm of Mind** 是整个验证计划的**集成核心阶段**，对标人类大脑的**前额叶皮层 (Prefrontal Cortex)** —— 负责执行控制、计划决策与工具调度的中枢。
 
-1. **实现 Glass-Box Runtime**：构建完全透明可观测的 Agent 运行时环境
-2. **完成 ADK 标准化集成**：实现 `PostgresSessionService` 和 `PostgresMemoryService` 适配器
-3. **构建动态工具注册表**：实现数据库驱动的 Tool Registry，支持热更新
-4. **验证白盒可观测性**：集成 OpenTelemetry，实现全链路 Trace 追踪
-5. **集成安全沙箱**：确保 Code Interpreter 与 Function Tools 的安全隔离运行
+本阶段的核心任务是 **"Connecting the Dots"**：将前三个阶段构建的感知 (Perception)、记忆 (Hippocampus) 与状态 (Pulse) 能力，通过标准化的 **Agent Runtime** 编排起来，形成具备完整心智的智能体。
+
+**关键交付目标**：
+
+1. **Framework Adaptation (骨架适配)**：实现 `PostgresSessionService` 与 `PostgresMemoryService`，完成与 **Google ADK** 的标准化接口对接。
+2. **Glass-Box Runtime (白盒运行时)**：构建完全透明的 `AgentExecutor`，取代黑盒 API，确保推理过程的每一步（Thought -> Action -> Observation）均可观测、可调试。
+3. **Dynamic Capability (动态能力)**：构建数据库驱动的 **Tool Registry**，支持工具的热加载与权限控制。
+4. **Safe Execution (安全执行)**：集成 **Sandbox (沙箱)** 环境，确保代码解释器 (Code Interpreter) 与外部工具的安全隔离。
 
 ```mermaid
 graph LR
-    subgraph "Phase 4: The Realm of Mind"
-        F[Phase 1/2/3 基座<br>Session+Memory+Perception] --> M1[ADK Adapter<br>标准化集成]
-        F --> M2[Tool Registry<br>动态工具管理]
-        F --> M3[Glass-Box Tracing<br>白盒可观测]
-        F --> M4[Sandbox<br>安全沙箱]
+    subgraph Foundation ["Phase 1-3: The Cortex Integration"]
+        direction TB
+        P1[Pulse<br>Session State]
+        P2[Hippocampus<br>Long-term Memory]
+        P3[Perception<br>Fusion Retrieval]
     end
 
-    M1 & M2 & M3 & M4 --> V[Verification<br>验收通过]
-    V --> Phase5[Phase 5: Integrated Demo]
+    subgraph Realm ["Phase 4: The Realm of Mind"]
+        direction TB
+        Adapter[ADK Adapter<br>Standard Interface]
+        Registry[Tool Registry<br>Dynamic Capabilities]
+        Runtime[Glass-Box Runtime<br>Tracing & Orchestration]
+        Sandbox[Sandbox<br>Safe Execution]
+    end
 
-    style F fill:#065f46,stroke:#34d399,color:#fff
-    style M1 fill:#7c2d12,stroke:#fb923c,color:#fff
-    style M2 fill:#7c2d12,stroke:#fb923c,color:#fff
-    style M3 fill:#7c2d12,stroke:#fb923c,color:#fff
-    style M4 fill:#7c2d12,stroke:#fb923c,color:#fff
+    P1 & P2 & P3 --> Adapter
+    Adapter --> Runtime
+    Registry --> Runtime
+    Sandbox -.-> Runtime
+
+    Runtime --> V[Phase 5: Integrated Demo]
+
+    style Foundation fill:#1e293b,stroke:#475569,color:#e2e8f0
+    style Realm fill:#0f172a,stroke:#3b82f6,stroke-width:2px,color:#fff
+    style Adapter fill:#1e3a8a,stroke:#60a5fa,color:#fff
+    style Registry fill:#1e3a8a,stroke:#60a5fa,color:#fff
+    style Runtime fill:#1e40af,stroke:#93c5fd,stroke-width:3px,color:#fff
+    style Sandbox fill:#3730a3,stroke:#818cf8,color:#fff
+    style V fill:#064e3b,stroke:#34d399,color:#fff
 ```
 
 ### 1.2 核心概念解析
@@ -141,7 +158,7 @@ graph TB
 
 ---
 
-## 2. 技术调研：ADK Runtime 深度分析
+## 2. 核心参考模型：ADK Runtime
 
 ### 2.1 ADK SessionService 接口契约
 
@@ -608,7 +625,7 @@ CREATE INDEX IF NOT EXISTS idx_traces_start_time ON traces(start_time DESC);
 
 ---
 
-## 4. 实施计划：分步执行指南
+## 4. 实施指南
 
 ### 4.1 Step 1: PostgresSessionService 实现
 
@@ -3067,7 +3084,7 @@ class ThinkingVisualizer:
 
 ---
 
-## 5. 验收标准
+## 5. 验证 SOP (Phase 4)
 
 ### 5.1 功能验收
 
@@ -3640,7 +3657,7 @@ asyncio.run(test_postgres_tracing())
 
 ---
 
-## 6. 交付物清单
+## 6. 验收基准
 
 | 模块               | 文件/目录                                                 | 描述                  |
 | :----------------- | :-------------------------------------------------------- | :-------------------- |
@@ -3656,7 +3673,9 @@ asyncio.run(test_postgres_tracing())
 
 ---
 
-## 7. 参考资料
+## 7. 风险与缓解策略
+
+## 8. 参考资料
 
 <a id="ref1"></a>1. Google. (2025). _ADK Sessions Documentation_. [Link](https://google.github.io/adk-docs/sessions/)
 
