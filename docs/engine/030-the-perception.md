@@ -47,10 +47,10 @@ graph LR
     P1 & P2 & P3 --> V[Verification<br>验收通过]
     V --> Phase4[Phase 4: Realm of Mind]
 
-    style F fill:#065f46,stroke:#34d399,color:#fff
-    style P1 fill:#7c2d12,stroke:#fb923c,color:#fff
-    style P2 fill:#7c2d12,stroke:#fb923c,color:#fff
-    style P3 fill:#7c2d12,stroke:#fb923c,color:#fff
+    style F fill:#059669,stroke:#34d399,color:#fff
+    style P1 fill:#ea580c,stroke:#fb923c,color:#fff
+    style P2 fill:#ea580c,stroke:#fb923c,color:#fff
+    style P3 fill:#ea580c,stroke:#fb923c,color:#fff
 ```
 
 ### 1.2 核心设计 (Core Architecture)
@@ -120,9 +120,9 @@ flowchart TB
     L1 -- "Final Results (Top-10)" --> Output([Context Chunks])
 
     %% Styling
-    style Input fill:#1e3a5f,stroke:#60a5fa,color:#fff
-    style Runtime fill:#7c2d12,stroke:#fb923c,color:#fff
-    style Storage fill:#065f46,stroke:#34d399,color:#fff
+    style Input fill:#2563eb,stroke:#60a5fa,color:#fff
+    style Runtime fill:#ea580c,stroke:#fb923c,color:#fff
+    style Storage fill:#059669,stroke:#34d399,color:#fff
 ```
 
 #### 1.2.3 Two-Stage Retrieval (两阶段检索)
@@ -197,7 +197,7 @@ sequenceDiagram
     User->>Runtime: Inquiry
     Runtime->>Engine: retrieve(query, filters)
 
-    rect rgb(6, 95, 70)
+    rect rgb(5, 150, 105)
         note right of Engine: L0 Retrieval (PostgreSQL)
         par Parallel Execution
             Engine->>Engine: Semantic Search (HNSW)
@@ -208,7 +208,7 @@ sequenceDiagram
 
     Engine-->>Runtime: L0 Candidates
 
-    rect rgb(124, 45, 18)
+    rect rgb(234, 88, 12)
         note right of Runtime: L1 Precision (Python)
         Runtime->>Rerank: Cross-Encode(Query, Candidates)
         Rerank-->>Runtime: Re-scored Results
@@ -406,6 +406,9 @@ erDiagram
 不同于传统架构需分别查询 Vector DB 和 Search Engine，PostgreSQL 支持通过 **CTE (Common Table Expressions)** 实现单次 SQL 交互的混合检索：
 
 ```sql
+-- [Logic Reference]
+-- Implemented in 'hybrid_search' function in src/cognizes/engine/schema/perception_schema.sql
+
 WITH semantic AS (
     SELECT id, 1 - (embedding <=> $emb) as score FROM docs ORDER BY embedding <=> $emb LIMIT 50
 ),
@@ -507,6 +510,9 @@ JSONB 过滤能力正交分解为以下维度：
 > **Implementation Reference**: See [src/cognizes/engine/schema/perception_schema.sql](../../src/cognizes/engine/schema/perception_schema.sql) (Part 3) for the actual DDLs.
 
 ```sql
+-- [Source of Truth Reference]
+-- see src/cognizes/engine/schema/perception_schema.sql for actual DDL
+
 -- 1. 通用 GIN 索引 (One Size Fits All): 支撑 80% 的包含/存在性查询
 CREATE INDEX idx_memories_metadata_gin ON memories USING GIN (metadata);
 
@@ -671,8 +677,8 @@ flowchart LR
         LLM --> Answer[回答 + 引用]
     end
 
-    style 离线阶段 fill:#334155,stroke:#475569,color:#f8fafc
-    style 在线阶段 fill:#365314,stroke:#4d7c0f,color:#f7fee7
+    style 离线阶段 fill:#475569,stroke:#94a3b8,color:#fff
+    style 在线阶段 fill:#65a30d,stroke:#a3e635,color:#fff
 ```
 
 #### 3.5.2 RAG Pipeline 核心接口
@@ -780,9 +786,9 @@ flowchart LR
     Parser --> Transform
     Transform --> Output
 
-    style Input fill:#334155,stroke:#475569,color:#f8fafc
-    style Orchestrator fill:#3f3f46,stroke:#52525b,color:#fafafa
-    style Output fill:#365314,stroke:#4d7c0f,color:#f7fee7
+    style Input fill:#475569,stroke:#94a3b8,color:#fff
+    style Orchestrator fill:#52525b,stroke:#a1a1aa,color:#fff
+    style Output fill:#65a30d,stroke:#a3e635,color:#fff
 ```
 
 #### 3.6.2 组件设计模式 (Component Design)
