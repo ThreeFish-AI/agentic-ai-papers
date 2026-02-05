@@ -156,15 +156,15 @@ class RerankerPipeline:
 
 # 使用示例
 async def main():
-    import asyncpg
+    from cognizes.core.database import DatabaseManager
+    import numpy as np
 
     # 初始化
-    pool = await asyncpg.create_pool("postgresql://aigc:@localhost/cognizes-engine")
+    db = DatabaseManager.get_instance()
+    pool = await db.get_pool()
     pipeline = RerankerPipeline(pool)
 
     # 生成查询向量 (实际应使用 Embedding 模型)
-    import numpy as np
-
     query_embedding = list(np.random.randn(1536).astype(float))
 
     # 执行两阶段检索
@@ -182,7 +182,7 @@ async def main():
     for i, r in enumerate(results, 1):
         print(f"{i}. [Score: {r.rerank_score:.4f}] {r.content[:100]}...")
 
-    await pool.close()
+    # Pool managed by DatabaseManager
 
 
 if __name__ == "__main__":

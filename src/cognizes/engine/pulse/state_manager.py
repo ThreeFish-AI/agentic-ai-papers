@@ -14,9 +14,10 @@ import json
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
-import asyncpg
+if TYPE_CHECKING:
+    from cognizes.core.database import DatabaseManager
 
 
 @dataclass
@@ -63,9 +64,14 @@ class StateManager:
     4. State 前缀解析
     """
 
-    def __init__(self, pool: asyncpg.Pool):
-        self.pool = pool
+    def __init__(self, db: "DatabaseManager"):
+        # Type hint is DatabaseManager to support IDE autocompletion
+        self.db = db
         self._temp_state: dict[str, dict] = {}  # temp: 前缀的内存缓存
+
+    # ========================================
+    # Session CRUD 操作
+    # ========================================
 
     # ========================================
     # Session CRUD 操作
@@ -73,70 +79,25 @@ class StateManager:
 
     async def create_session(self, app_name: str, user_id: str, initial_state: dict[str, Any] | None = None) -> Session:
         """创建新会话"""
-        session_id = str(uuid.uuid4())
+        session_id = uuid.uuid4()
         state = initial_state or {}
 
-        async with self.pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """
-                INSERT INTO threads (id, app_name, user_id, state)
-                VALUES ($1, $2, $3, $4)
-                RETURNING id, app_name, user_id, state, version, created_at, updated_at
-                """,
-                uuid.UUID(session_id),
-                app_name,
-                user_id,
-                json.dumps(state),
-            )
-
+        row = await self.db.sessions.create(session_id, app_name, user_id, state)
         return self._row_to_session(row)
 
     async def get_session(self, app_name: str, user_id: str, session_id: str) -> Session | None:
         """获取会话"""
-        async with self.pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """
-                SELECT id, app_name, user_id, state, version, created_at, updated_at
-                FROM threads
-                WHERE id = $1 AND app_name = $2 AND user_id = $3
-                """,
-                uuid.UUID(session_id),
-                app_name,
-                user_id,
-            )
-
+        row = await self.db.sessions.get(uuid.UUID(session_id), app_name, user_id)
         return self._row_to_session(row) if row else None
 
     async def list_sessions(self, app_name: str, user_id: str) -> list[Session]:
         """列出用户所有会话"""
-        async with self.pool.acquire() as conn:
-            rows = await conn.fetch(
-                """
-                SELECT id, app_name, user_id, state, version, created_at, updated_at
-                FROM threads
-                WHERE app_name = $1 AND user_id = $2
-                ORDER BY updated_at DESC
-                """,
-                app_name,
-                user_id,
-            )
-
+        rows = await self.db.sessions.list(app_name, user_id)
         return [self._row_to_session(row) for row in rows]
 
     async def delete_session(self, app_name: str, user_id: str, session_id: str) -> bool:
         """删除会话"""
-        async with self.pool.acquire() as conn:
-            result = await conn.execute(
-                """
-                DELETE FROM threads
-                WHERE id = $1 AND app_name = $2 AND user_id = $3
-                """,
-                uuid.UUID(session_id),
-                app_name,
-                user_id,
-            )
-
-        return result == "DELETE 1"
+        return await self.db.sessions.delete(uuid.UUID(session_id), app_name, user_id)
 
     # ========================================
     # 原子状态流转
@@ -145,59 +106,253 @@ class StateManager:
     async def append_event(self, session: Session, event: Event) -> Event:
         """
         追加事件并原子性地应用 state_delta
-
-        这是 Pulse Engine 的核心方法，确保：
-        1. Event 追加和 State 更新在同一事务中
-        2. 乐观锁检查防止并发冲突
-        3. state_delta 正确应用到 session.state
         """
         state_delta = event.actions.get("state_delta", {})
+        new_state = None
 
-        async with self.pool.acquire() as conn:
-            async with conn.transaction():
-                # 1. 乐观锁检查 + 更新状态
-                if state_delta:
-                    new_state = {**session.state, **state_delta}
-                    result = await conn.fetchrow(
-                        """
-                        UPDATE threads
-                        SET state = $1, version = version + 1, updated_at = NOW()
-                        WHERE id = $2 AND version = $3
-                        RETURNING version
-                        """,
-                        json.dumps(new_state),
-                        uuid.UUID(session.id),
-                        session.version,
-                    )
+        if state_delta:
+            new_state = {**session.state, **state_delta}
 
-                    if result is None:
-                        raise ConcurrencyConflictError(
-                            f"Session {session.id} version conflict. Expected {session.version}, but it was modified."
-                        )
+        event_data = {
+            "id": uuid.uuid4(),
+            "invocation_id": uuid.UUID(event.invocation_id),
+            "author": event.author,
+            "event_type": event.event_type,
+            "content": event.content,
+            "actions": event.actions,
+        }
 
-                    # 更新本地 session 对象
-                    session.state = new_state
-                    session.version = result["version"]
+        result = await self.db.events.atomic_append(uuid.UUID(session.id), session.version, new_state, event_data)
 
-                # 2. 追加事件
-                event_id = str(uuid.uuid4())
-                row = await conn.fetchrow(
-                    """
-                    INSERT INTO events (id, thread_id, invocation_id, author, event_type, content, actions)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7)
-                    RETURNING id, created_at
-                    """,
-                    uuid.UUID(event_id),
-                    uuid.UUID(session.id),
-                    uuid.UUID(event.invocation_id),
-                    event.author,
-                    event.event_type,
-                    json.dumps(event.content),
-                    json.dumps(event.actions),
+        if result["status"] == "conflict":
+            raise ConcurrencyConflictError(
+                f"Session {session.id} version conflict. Expected {session.version}, but it was modified."
+            )
+
+        # Success - update local objects
+        event_row = result["event"]
+        event.id = str(event_row["id"])
+        event.created_at = event_row["created_at"]
+
+        if result["version"] is not None:
+            session.version = result["version"]
+            if new_state:
+                session.state = new_state
+
+        return event
+
+    # ========================================
+    # 乐观并发控制 (OCC)
+    # ========================================
+
+    async def update_session_state(
+        self, session: Session, state_delta: dict[str, Any], max_retries: int = 3
+    ) -> Session:
+        """
+        带重试的乐观锁状态更新
+        """
+        for attempt in range(max_retries):
+            try:
+                # 构造一个 state_update 事件
+                event = Event(
+                    id="",
+                    thread_id=session.id,
+                    invocation_id=str(uuid.uuid4()),
+                    author="system",
+                    event_type="state_update",
+                    actions={"state_delta": state_delta},
                 )
+                await self.append_event(session, event)
+                return session
 
-                event.id = str(row["id"])
-                event.created_at = row["created_at"]
+            except ConcurrencyConflictError:
+                if attempt == max_retries - 1:
+                    raise
+
+                # 重新加载最新状态
+                updated_session = await self.get_session(session.app_name, session.user_id, session.id)
+                if updated_session:
+                    session.state = updated_session.state
+                    session.version = updated_session.version
+
+                await asyncio.sleep(0.01 * (attempt + 1))  # 退避策略
+
+        return session
+
+    # ========================================
+    # State 前缀处理
+    # ========================================
+
+    def parse_state_prefix(self, key: str) -> tuple[str, str]:
+        """
+        解析 State Key 的前缀
+        """
+        prefixes = ["user:", "app:", "temp:"]
+        for prefix in prefixes:
+            if key.startswith(prefix):
+                return prefix.rstrip(":"), key[len(prefix) :]
+        return "session", key
+
+    async def set_state(self, session: Session, key: str, value: Any) -> None:
+        """
+        根据前缀设置状态值
+        """
+        prefix, actual_key = self.parse_state_prefix(key)
+
+        if prefix == "session":
+            await self.update_session_state(session, {actual_key: value})
+
+        elif prefix == "temp":
+            cache_key = f"{session.id}"
+            if cache_key not in self._temp_state:
+                self._temp_state[cache_key] = {}
+            self._temp_state[cache_key][actual_key] = value
+
+        elif prefix == "user":
+            await self.db.states.set_user_state(session.user_id, session.app_name, actual_key, value)
+
+        elif prefix == "app":
+            await self.db.states.set_app_state(session.app_name, actual_key, value)
+
+    async def get_state(self, session: Session, key: str, default: Any = None) -> Any:
+        """
+        根据前缀获取状态值
+        """
+        prefix, actual_key = self.parse_state_prefix(key)
+
+        if prefix == "session":
+            return session.state.get(actual_key, default)
+
+        elif prefix == "temp":
+            cache_key = f"{session.id}"
+            temp_state = self._temp_state.get(cache_key, {})
+            return temp_state.get(actual_key, default)
+
+        elif prefix == "user":
+            val = await self.db.states.get_user_state(session.user_id, session.app_name, actual_key)
+            return val if val is not None else default
+
+        elif prefix == "app":
+            val = await self.db.states.get_app_state(session.app_name, actual_key)
+            return val if val is not None else default
+
+        return default
+
+    async def get_all_state(self, session: Session) -> dict[str, Any]:
+        """
+        获取会话的完整状态视图 (合并所有作用域)
+        """
+        result = {}
+
+        # Session scope (无前缀)
+        result.update(session.state)
+
+        # Temp scope
+        cache_key = f"{session.id}"
+        temp_state = self._temp_state.get(cache_key, {})
+        for k, v in temp_state.items():
+            result[f"temp:{k}"] = v
+
+        # User scope
+        user_state = await self.db.states.get_all_user_state(session.user_id, session.app_name)
+        for k, v in user_state.items():
+            result[f"user:{k}"] = v
+
+        # App scope
+        app_state = await self.db.states.get_all_app_state(session.app_name)
+        for k, v in app_state.items():
+            result[f"app:{k}"] = v
+
+        return result
+
+    # ========================================
+    # 辅助方法
+    # ========================================
+
+    def _row_to_session(self, row: Any) -> Session:
+        """将数据库行转换为 Session 对象"""
+        # Note: 'row' is likely asyncpg.Record, but we use Any to avoid overly strict type checking
+        # without importing asyncpg here if we want to decouple fully.
+
+        raw_state = row["state"]
+        if isinstance(raw_state, str):
+            state = json.loads(raw_state)
+        elif isinstance(raw_state, dict):
+            state = raw_state
+        else:
+            state = {}
+
+        return Session(
+            id=str(row["id"]),
+            app_name=row["app_name"],
+            user_id=row["user_id"],
+            state=state,
+            version=row["version"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    async def create_session(self, app_name: str, user_id: str, initial_state: dict[str, Any] | None = None) -> Session:
+        """创建新会话"""
+        session_id = uuid.uuid4()
+        state = initial_state or {}
+
+        row = await self.db.sessions.create(session_id, app_name, user_id, state)
+        return self._row_to_session(row)
+
+    async def get_session(self, app_name: str, user_id: str, session_id: str) -> Session | None:
+        """获取会话"""
+        row = await self.db.sessions.get(uuid.UUID(session_id), app_name, user_id)
+        return self._row_to_session(row) if row else None
+
+    async def list_sessions(self, app_name: str, user_id: str) -> list[Session]:
+        """列出用户所有会话"""
+        rows = await self.db.sessions.list(app_name, user_id)
+        return [self._row_to_session(row) for row in rows]
+
+    async def delete_session(self, app_name: str, user_id: str, session_id: str) -> bool:
+        """删除会话"""
+        return await self.db.sessions.delete(uuid.UUID(session_id), app_name, user_id)
+
+    # ========================================
+    # 原子状态流转
+    # ========================================
+
+    async def append_event(self, session: Session, event: Event) -> Event:
+        """
+        追加事件并原子性地应用 state_delta
+        """
+        state_delta = event.actions.get("state_delta", {})
+        new_state = None
+
+        if state_delta:
+            new_state = {**session.state, **state_delta}
+
+        event_data = {
+            "id": uuid.uuid4(),
+            "invocation_id": uuid.UUID(event.invocation_id),
+            "author": event.author,
+            "event_type": event.event_type,
+            "content": event.content,
+            "actions": event.actions,
+        }
+
+        result = await self.db.events.atomic_append(uuid.UUID(session.id), session.version, new_state, event_data)
+
+        if result["status"] == "conflict":
+            raise ConcurrencyConflictError(
+                f"Session {session.id} version conflict. Expected {session.version}, but it was modified."
+            )
+
+        # Success - update local objects
+        event_row = result["event"]
+        event.id = str(event_row["id"])
+        event.created_at = event_row["created_at"]
+
+        if result["version"] is not None:
+            session.version = result["version"]
+            if new_state:
+                session.state = new_state
 
         return event
 
@@ -263,11 +418,6 @@ class StateManager:
     async def set_state(self, session: Session, key: str, value: Any) -> None:
         """
         根据前缀设置状态值
-
-        - 无前缀: 存入 session.state
-        - user: 存入 user_states 表
-        - app: 存入 app_states 表
-        - temp: 存入内存缓存
         """
         prefix, actual_key = self.parse_state_prefix(key)
 
@@ -281,54 +431,14 @@ class StateManager:
             self._temp_state[cache_key][actual_key] = value
 
         elif prefix == "user":
-            await self._set_user_state(session.app_name, session.user_id, actual_key, value)
+            await self.db.states.set_user_state(session.user_id, session.app_name, actual_key, value)
 
         elif prefix == "app":
-            await self._set_app_state(session.app_name, actual_key, value)
-
-    async def _set_user_state(self, app_name: str, user_id: str, key: str, value: Any) -> None:
-        """设置用户级状态"""
-        async with self.pool.acquire() as conn:
-            await conn.execute(
-                """
-                INSERT INTO user_states (user_id, app_name, state, updated_at)
-                VALUES ($1, $2, jsonb_build_object($3, $4::jsonb), NOW())
-                ON CONFLICT (user_id, app_name)
-                DO UPDATE SET
-                    state = user_states.state || jsonb_build_object($3, $4::jsonb),
-                    updated_at = NOW()
-                """,
-                user_id,
-                app_name,
-                key,
-                value,
-            )
-
-    async def _set_app_state(self, app_name: str, key: str, value: Any) -> None:
-        """设置应用级状态"""
-        async with self.pool.acquire() as conn:
-            await conn.execute(
-                """
-                INSERT INTO app_states (app_name, state, updated_at)
-                VALUES ($1, jsonb_build_object($2, $3::jsonb), NOW())
-                ON CONFLICT (app_name)
-                DO UPDATE SET
-                    state = app_states.state || jsonb_build_object($2, $3::jsonb),
-                    updated_at = NOW()
-                """,
-                app_name,
-                key,
-                value,
-            )
+            await self.db.states.set_app_state(session.app_name, actual_key, value)
 
     async def get_state(self, session: Session, key: str, default: Any = None) -> Any:
         """
         根据前缀获取状态值
-
-        - 无前缀: 从 session.state 读取
-        - user: 从 user_states 表读取
-        - app: 从 app_states 表读取
-        - temp: 从内存缓存读取
         """
         prefix, actual_key = self.parse_state_prefix(key)
 
@@ -341,52 +451,18 @@ class StateManager:
             return temp_state.get(actual_key, default)
 
         elif prefix == "user":
-            return await self._get_user_state(session.app_name, session.user_id, actual_key, default)
+            val = await self.db.states.get_user_state(session.user_id, session.app_name, actual_key)
+            return val if val is not None else default
 
         elif prefix == "app":
-            return await self._get_app_state(session.app_name, actual_key, default)
+            val = await self.db.states.get_app_state(session.app_name, actual_key)
+            return val if val is not None else default
 
         return default
-
-    async def _get_user_state(self, app_name: str, user_id: str, key: str, default: Any = None) -> Any:
-        """获取用户级状态"""
-        async with self.pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """
-                SELECT state->$3 as value
-                FROM user_states
-                WHERE user_id = $1 AND app_name = $2
-                """,
-                user_id,
-                app_name,
-                key,
-            )
-        return row["value"] if row and row["value"] is not None else default
-
-    async def _get_app_state(self, app_name: str, key: str, default: Any = None) -> Any:
-        """获取应用级状态"""
-        async with self.pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """
-                SELECT state->$2 as value
-                FROM app_states
-                WHERE app_name = $1
-                """,
-                app_name,
-                key,
-            )
-        return row["value"] if row and row["value"] is not None else default
 
     async def get_all_state(self, session: Session) -> dict[str, Any]:
         """
         获取会话的完整状态视图 (合并所有作用域)
-
-        返回格式: {
-            "session_key": value,           # 无前缀
-            "user:user_key": value,         # user: 前缀
-            "app:app_key": value,           # app: 前缀
-            "temp:temp_key": value          # temp: 前缀
-        }
         """
         result = {}
 
@@ -400,22 +476,14 @@ class StateManager:
             result[f"temp:{k}"] = v
 
         # User scope
-        async with self.pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT state FROM user_states WHERE user_id = $1 AND app_name = $2",
-                session.user_id,
-                session.app_name,
-            )
-            if row and row["state"]:
-                for k, v in row["state"].items():
-                    result[f"user:{k}"] = v
+        user_state = await self.db.states.get_all_user_state(session.user_id, session.app_name)
+        for k, v in user_state.items():
+            result[f"user:{k}"] = v
 
         # App scope
-        async with self.pool.acquire() as conn:
-            row = await conn.fetchrow("SELECT state FROM app_states WHERE app_name = $1", session.app_name)
-            if row and row["state"]:
-                for k, v in row["state"].items():
-                    result[f"app:{k}"] = v
+        app_state = await self.db.states.get_all_app_state(session.app_name)
+        for k, v in app_state.items():
+            result[f"app:{k}"] = v
 
         return result
 

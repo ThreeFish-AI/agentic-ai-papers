@@ -69,7 +69,10 @@ async def run_benchmark(
 
 # 使用示例
 async def main():
-    pool = await asyncpg.create_pool("postgresql://aigc:@localhost/cognizes-engine")
+    from cognizes.core.database import DatabaseManager
+
+    db = DatabaseManager.get_instance()
+    pool = await db.get_pool()
 
     # 生成随机查询向量
     query_embedding = list(np.random.randn(1536).astype(float))
@@ -81,7 +84,7 @@ async def main():
     for r in results:
         print(f"| {r.ef_search} | {r.qps:.1f} | {r.recall_at_10:.2%} | {r.p99_latency_ms:.1f}ms |")
 
-    await pool.close()
+    # Pool managed by DatabaseManager
 
 
 if __name__ == "__main__":

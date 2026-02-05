@@ -12,7 +12,6 @@ import json
 import uuid
 from typing import Any, Optional
 
-import asyncpg
 
 # ADK 官方类型
 from google.adk.sessions import Session
@@ -21,6 +20,9 @@ from google.adk.memory.base_memory_service import (
     SearchMemoryResponse,
     MemoryEntry,
 )
+
+
+from cognizes.core.database import DatabaseManager
 
 
 class PostgresMemoryService(BaseMemoryService):
@@ -34,8 +36,8 @@ class PostgresMemoryService(BaseMemoryService):
     2. 基于语义相似度检索相关记忆 (复用 Phase 3 hybrid_search)
     """
 
-    def __init__(self, pool: asyncpg.Pool, embedding_fn: Optional[callable] = None, consolidation_worker=None):
-        self._pool = pool
+    def __init__(self, db: DatabaseManager, embedding_fn: Optional[callable] = None, consolidation_worker=None):
+        self.db = db
         self._embedding_fn = embedding_fn  # 向量化函数
         self._consolidation_worker = consolidation_worker  # Phase 2 Worker
 
@@ -79,21 +81,15 @@ class PostgresMemoryService(BaseMemoryService):
         if self._embedding_fn:
             embedding = await self._embedding_fn(combined_content)
 
-        async with self._pool.acquire() as conn:
-            await conn.execute(
-                """
-                INSERT INTO memories
-                (thread_id, user_id, app_name, memory_type, content, embedding, metadata)
-                VALUES ($1, $2, $3, $4, $5, $6, $7)
-                """,
-                uuid.UUID(session.id) if session.id else None,
-                session.user_id,
-                session.app_name,
-                "episodic",
-                combined_content,
-                embedding,
-                json.dumps({"source": "session", "event_count": len(session.events)}),
-            )
+        await self.db.memories.insert(
+            thread_id=uuid.UUID(session.id) if session.id else None,
+            user_id=session.user_id,
+            app_name=session.app_name,
+            memory_type="episodic",
+            content=combined_content,
+            embedding=embedding,
+            metadata={"source": "session", "event_count": len(session.events)},
+        )
 
     async def search_memory(
         self,
@@ -108,38 +104,10 @@ class PostgresMemoryService(BaseMemoryService):
         if self._embedding_fn:
             query_embedding = await self._embedding_fn(query)
 
-        async with self._pool.acquire() as conn:
-            if query_embedding:
-                # 向量检索
-                rows = await conn.fetch(
-                    """
-                    SELECT id, content, metadata, created_at,
-                           1 - (embedding <=> $1) AS relevance_score
-                    FROM memories
-                    WHERE user_id = $2 AND app_name = $3
-                    ORDER BY embedding <=> $1
-                    LIMIT 10
-                    """,
-                    query_embedding,
-                    user_id,
-                    app_name,
-                )
-            else:
-                # 降级为全文检索
-                rows = await conn.fetch(
-                    """
-                    SELECT id, content, metadata, created_at,
-                           ts_rank_cd(search_vector, plainto_tsquery($1)) AS relevance_score
-                    FROM memories
-                    WHERE user_id = $2 AND app_name = $3
-                      AND search_vector @@ plainto_tsquery($1)
-                    ORDER BY relevance_score DESC
-                    LIMIT 10
-                    """,
-                    query,
-                    user_id,
-                    app_name,
-                )
+        if query_embedding:
+            rows = await self.db.memories.search_vector(user_id, app_name, query_embedding)
+        else:
+            rows = await self.db.memories.search_fulltext(user_id, app_name, query)
 
         memories = []
         for row in rows:
@@ -169,19 +137,7 @@ class PostgresMemoryService(BaseMemoryService):
 
     async def list_memories(self, *, app_name: str, user_id: str, limit: int = 100) -> list[MemoryEntry]:
         """列出用户所有记忆 (扩展方法，非 ADK 基类要求)"""
-        async with self._pool.acquire() as conn:
-            rows = await conn.fetch(
-                """
-                SELECT id, content, metadata, retention_score, created_at
-                FROM memories
-                WHERE user_id = $1 AND app_name = $2
-                ORDER BY created_at DESC
-                LIMIT $3
-                """,
-                user_id,
-                app_name,
-                limit,
-            )
+        rows = await self.db.memories.list_recent(user_id, app_name, limit)
 
         # 复用相同的转换逻辑
         memories = []

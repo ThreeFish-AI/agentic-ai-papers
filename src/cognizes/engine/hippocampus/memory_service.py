@@ -7,6 +7,7 @@ OpenMemoryService: ADK MemoryService 适配器
 
 from __future__ import annotations
 
+import json
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -182,7 +183,11 @@ class OpenMemoryService:
                 content=row["content"],
                 memory_type=row["memory_type"],
                 relevance_score=float(row["relevance"]),
-                metadata=row["metadata"] if isinstance(row["metadata"], dict) else {},
+                metadata=(
+                    row["metadata"]
+                    if isinstance(row["metadata"], dict)
+                    else (json.loads(row["metadata"]) if isinstance(row["metadata"], str) else {})
+                ),
             )
             for row in rows
         ]

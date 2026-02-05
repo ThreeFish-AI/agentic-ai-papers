@@ -1,7 +1,7 @@
 ---
-id: agentic-ai-engine
+id: cognizes-engine
 sidebar_position: 1.0
-title: Agentic AI Engine
+title: Cognizes Engine
 last_update:
   author: Aurelius Huang
   created_at: 2025-12-16

@@ -5,8 +5,8 @@
 支持配置不同数据规模：10 万 (快速测试) 和 1000 万 (性能验证)。
 
 用法:
-    python generate_test_data.py --scale quick    # 10 万条
-    python generate_test_data.py --scale full     # 1000 万条
+    python -m src.cognizes.engine.perception.generate_test_data --scale quick    # 10 万条
+    python -m src.cognizes.engine.perception.generate_test_data --scale full     # 1000 万条
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ import asyncio
 import random
 import time
 import uuid
+import os
 
 import asyncpg
 import numpy as np
@@ -136,27 +137,36 @@ async def verify_data_distribution(pool: asyncpg.Pool):
 async def main():
     parser = argparse.ArgumentParser(description="生成 High-Selectivity 测试数据")
     parser.add_argument("--scale", choices=["quick", "full"], default="quick", help="数据规模: quick=10万, full=1000万")
-    parser.add_argument("--db-url", default="postgresql://aigc:@localhost/cognizes-engine", help="数据库连接 URL")
+    parser.add_argument(
+        "--db-url",
+        default=os.getenv("DATABASE_URL", "postgresql://aigc:@localhost/cognizes-engine"),
+        help="数据库连接 URL",
+    )
     parser.add_argument("--clean", action="store_true", help="清理现有测试数据后再生成")
     args = parser.parse_args()
 
     config = SCALE_CONFIG[args.scale]
     print(f"🚀 {config['description']}")
 
-    pool = await asyncpg.create_pool(args.db_url, min_size=2, max_size=10)
+    try:
+        pool = await asyncpg.create_pool(args.db_url, min_size=2, max_size=10)
+    except Exception as e:
+        print(f"❌ Database connection failed: {e}")
+        return
 
-    if args.clean:
-        print("\n🗑️ 清理现有测试数据...")
-        await pool.execute("DELETE FROM memories WHERE app_name = 'test_app'")
+    try:
+        if args.clean:
+            print("\n🗑️ 清理现有测试数据...")
+            await pool.execute("DELETE FROM memories WHERE app_name = 'test_app'")
 
-    await generate_test_data(pool, total_records=config["total_records"], batch_size=config["batch_size"])
+        await generate_test_data(pool, total_records=config["total_records"], batch_size=config["batch_size"])
 
-    await verify_data_distribution(pool)
+        await verify_data_distribution(pool)
 
-    print("\n💡 下一步: 运行基准测试验证 Recall@10")
-    print("   python benchmark.py --user-id rare_user_001")
-
-    await pool.close()
+        print("\n💡 下一步: 运行基准测试验证 Recall@10")
+        print("   python -m src.cognizes.engine.perception.benchmark --user-id rare_user_001")
+    finally:
+        await pool.close()
 
 
 if __name__ == "__main__":

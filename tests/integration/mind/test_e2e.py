@@ -29,30 +29,20 @@ class TestE2EIntegration:
         )
 
         # 3. 模拟多轮对话
-        # 3. 模拟多轮对话
-        from google.adk.events import Event
-
         for turn in range(3):
             # 用户输入
             await session_svc.append_event(
-                session,
-                Event(
-                    id=f"user_{turn}",
-                    author="user",
-                    # Pydantic usually handles dict->model conversion for content if definition allows,
-                    # but to be safe/explicit if it expects specific structure:
-                    content={"parts": [{"text": f"Turn {turn} message"}]},
-                ),
+                session, {"id": f"user_{turn}", "author": "user", "content": {"text": f"Turn {turn} message"}}
             )
             # Agent 响应
             await session_svc.append_event(
                 session,
-                Event(
-                    id=f"agent_{turn}",
-                    author="agent",
-                    content={"parts": [{"text": f"Response to turn {turn}"}]},
-                    actions={"state_delta": {f"app:turn_{turn}": True}},
-                ),
+                {
+                    "id": f"agent_{turn}",
+                    "author": "agent",
+                    "content": {"text": f"Response to turn {turn}"},
+                    "actions": {"state_delta": {f"app:turn_{turn}": True}},
+                },
             )
 
         # 4. 验证事件记录
@@ -72,12 +62,9 @@ class TestE2EIntegration:
         memory_svc = PostgresMemoryService(pool=db_pool)
 
         # 会话 1: 记录偏好
-        from google.adk.events import Event
-
         session1 = await session_svc.create_session(app_name="test_app", user_id="memory_user")
         await session_svc.append_event(
-            session1,
-            Event(id="pref_1", author="user", content={"parts": [{"text": "I prefer window seats on flights"}]}),
+            session1, {"id": "pref_1", "author": "user", "content": {"text": "I prefer window seats on flights"}}
         )
         await memory_svc.add_session_to_memory(session1)
 
@@ -85,4 +72,4 @@ class TestE2EIntegration:
         memories = await memory_svc.search_memory(
             app_name="test_app", user_id="memory_user", query="flight seat preference"
         )
-        assert any("window" in m.content.parts[0].text.lower() for m in memories.memories)
+        assert any("window" in m.content.lower() for m in memories.memories)

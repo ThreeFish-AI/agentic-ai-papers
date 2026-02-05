@@ -1,18 +1,18 @@
 ---
-id: the-pulse-implementation
+id: the-pulse
 sidebar_position: 1.0
-title: Phase 1：The Pulse 验证实施方案
+title: "Phase 1: The Pulse"
 last_update:
   author: Aurelius Huang
   created_at: 2026-01-08
-  updated_at: 2026-01-11
-  version: 1.2
-  status: Reviewed
+  updated_at: 2026-01-25
+  version: 2.1
+  status: Final
 tags:
   - The Pulse
   - Session Engine
-  - Implementation Plan
   - PostgreSQL
+  - Engineering Spec
 ---
 
 > [!NOTE]
@@ -21,9 +21,9 @@ tags:
 
 ---
 
-## 1. 执行概览
+## 1. 执行摘要
 
-### 1.1 Phase 1 定位与目标
+### 1.1 定位与目标 (Phase 1)
 
 **Phase 1: Foundation & The Pulse** 是整个验证计划的基石阶段，核心目标是：
 
@@ -48,41 +48,50 @@ graph LR
     style P3 fill:#7c2d12,stroke:#fb923c,color:#fff
 ```
 
-### 1.2 对标分析：Google ADK Session 机制
+### 1.2 核心设计：ADK Session 机制复刻
 
-基于 Google ADK 官方文档<sup>[[1]](#ref1)</sup>的分析，我们需要复刻以下核心能力：
+基于 Google ADK 官方文档<sup>[[1]](#ref1)</sup>的深度分析，The Pulse 确立了以 **Session** 为核心容器，**State** 与 **Event** 为双轮驱动的架构模式。
 
-| ADK 核心概念       | 定义                                                | PostgreSQL 复刻策略         |
+#### 1.2.1 核心概念映射
+
+我们采用 PostgreSQL 全栈生态来承载 ADK 的抽象模型，实现像素级对标：
+
+| ADK 核心概念       | 定义                                                | PostgreSQL 落地策略         |
 | :----------------- | :-------------------------------------------------- | :-------------------------- |
-| **Session**        | 单次用户-Agent 交互的容器，包含 `events` 和 `state` | `threads` 表 + `events` 表  |
-| **State**          | 会话内的 Key-Value 数据，支持前缀作用域             | JSONB 列 + 前缀解析逻辑     |
-| **Event**          | 交互中的原子操作记录                                | `events` 表 (append-only)   |
+| **Session**        | 单次用户-Agent 交互的容器，包含 `events` 和 `state` | `threads` 表 (主容器)       |
+| **State**          | 会话内的 Key-Value 数据，支持分层作用域             | JSONB + 前缀解析 (Scoped)   |
+| **Event**          | 交互中的原子操作记录                                | `events` 表 (Append-only)   |
 | **SessionService** | Session 生命周期管理接口                            | `OpenSessionService` 类实现 |
 
-#### 1.2.1 ADK State 前缀机制
+#### 1.2.2 状态作用域与生命周期 (State Scopes)
 
-ADK 通过 Key 前缀实现不同作用域的状态管理：
+针对不同维度的状态管理需求，我们实现了 ADK 定义的分层作用域机制：
 
-| 前缀    | 作用域           | 生命周期              | 复刻策略                   |
-| :------ | :--------------- | :-------------------- | :------------------------- |
-| 无前缀  | Session Scope    | 取决于 SessionService | 存入 `threads.state` JSONB |
-| `user:` | User Scope       | 持久化                | 存入 `user_states` 表      |
-| `app:`  | App Scope        | 持久化                | 存入 `app_states` 表       |
-| `temp:` | Invocation Scope | 仅当前调用            | 内存缓存，不持久化         |
+| 前缀      | 作用域           | 生命周期           | 存储策略                |
+| :-------- | :--------------- | :----------------- | :---------------------- |
+| (Default) | Session Scope    | 随会话存续         | `threads.state` (JSONB) |
+| `user:`   | User Scope       | 跨会话持久化       | `user_states` 表        |
+| `app:`    | App Scope        | Global 持久化      | `app_states` 表         |
+| `temp:`   | Invocation Scope | 仅当前思维链路有效 | 内存缓存 (Volatile)     |
 
-#### 1.2.2 State Granularity (状态颗粒度)
+#### 1.2.3 状态颗粒度 (State Granularity)
 
 > [!IMPORTANT]
->
-> **对标 Roadmap Pillar I**：状态颗粒度是 The Pulse 的核心设计要素，决定了数据的存储层次和生命周期。
+> **对标 Roadmap Pillar I**：状态颗粒度设计决定了系统的记忆密度与回溯能力。
 
 ```mermaid
 graph TB
     subgraph "State Granularity"
-        T[Thread 会话容器<br/>持久化] --> R[Run 执行链路<br/>临时]
-        T --> E[Events 事件流<br/>不可变]
-        E --> M[Messages 消息<br/>带 Embedding]
-        T --> S[Snapshots 快照<br/>可恢复]
+        T["Thread 会话容器<br/>持久化 (Persistent)"]
+        R["Run 执行链路<br/>临时 (Ephemeral)"]
+        E["Events 事件流<br/>不可变 (Immutable)"]
+        M[Messages 消息<br/>Embedding]
+        S["Snapshots 快照<br/>可恢复 (Recoverable)"]
+
+        T --> R
+        T --> E
+        T --> S
+        E --> M
     end
 
     style T fill:#1e3a5f,stroke:#60a5fa,color:#fff
@@ -90,100 +99,137 @@ graph TB
     style E fill:#065f46,stroke:#34d399,color:#fff
 ```
 
-| 层次         | 表名        | 定义                                                  | 生命周期       | 对应 Roadmap             |
-| :----------- | :---------- | :---------------------------------------------------- | :------------- | :----------------------- |
-| **Thread**   | `threads`   | 持久化存储用户级交互历史 (Human-Agent Interaction)    | 长期持久化     | "作为长期记忆的输入源"   |
-| **Run**      | `runs`      | 临时存储单次推理过程中的 Thinking Steps 和 Tool Calls | 仅执行期间存活 | "保障推理的可观测性"     |
-| **Event**    | `events`    | 不可变事件记录 (Message, ToolCall, StateUpdate)       | Append-only    | "Immutable Stream"       |
-| **Message**  | `messages`  | 带 Embedding 的消息内容                               | 持久化         | "Content with Embedding" |
-| **Snapshot** | `snapshots` | 状态检查点，用于快速恢复会话                          | 按策略清理     | "State Checkpoints"      |
+| 层次         | 表名        | 核心职责                                            | 生命周期     | 架构价值                     |
+| :----------- | :---------- | :-------------------------------------------------- | :----------- | :--------------------------- |
+| **Thread**   | `threads`   | 交互历史的主容器 (Human-Agent Interaction)          | 长期持久化   | 长期记忆的输入源             |
+| **Run**      | `runs`      | 单次推理过程的思维链 (Thinking Steps / Tool Calls)  | 执行期间存活 | 推理过程的可观测性           |
+| **Event**    | `events`    | 不可变的原子事件流 (Message, ToolCall, StateUpdate) | Append-only  | 确定的系统状态回溯           |
+| **Message**  | `messages`  | 语义负载容器                                        | 持久化       | 向量检索的核心语料           |
+| **Snapshot** | `snapshots` | 状态检查点                                          | 策略性清理   | 快速灾难恢复 (Fast Recovery) |
 
-#### 1.2.3 任务-章节对照表
+### 1.3 执行导图 (Execution Map)
+
+为确保 Phase 1 的精准落地，我们将实施任务与技术文档进行了二维映射，并制定了基于 SOP 的工期计划。
+
+#### 1.3.1 任务-文档锚定
 
 > [!NOTE]
->
-> 以下表格将 [001-task-checklist.md](./001-task-checklist.md) 的任务 ID 与本文档章节进行对照，便于追踪执行进度。
+> 关联文档：[001-task-checklist.md](./001-task-checklist.md)
 
-| 任务模块            | 任务 ID 范围      | 对应章节                                                                                   |
-| :------------------ | :---------------- | :----------------------------------------------------------------------------------------- |
-| PostgreSQL 生态部署 | P1-1-1 ~ P1-1-5   | [4.1 Step 1: 环境部署](#41-step-1-环境部署与基础设施)                                      |
-| 开发环境配置        | P1-1-6 ~ P1-1-9   | [4.1.2 开发环境配置](#412-开发环境配置)                                                    |
-| ADK Schema 调研     | P1-2-1 ~ P1-2-6   | [2. 技术调研](#2-技术调研adk-sessionservice-深度分析)                                      |
-| PostgreSQL Schema   | P1-2-7 ~ P1-2-14  | [3. 架构设计](#3-架构设计unified-schema) + [4.2 Schema 部署](#42-step-2-schema-设计与部署) |
-| 原子状态流转        | P1-3-1 ~ P1-3-7   | [4.3.1 StateManager](#431-statemanager-类实现)                                             |
-| 乐观并发控制        | P1-3-8 ~ P1-3-12  | [4.3.1 StateManager (OCC)](#431-statemanager-类实现)                                       |
-| 实时事件流          | P1-3-13 ~ P1-3-17 | [4.3.2 PgNotifyListener](#432-pgnotifylistener-实现)                                       |
-| 验收与文档          | P1-4-1 ~ P1-4-4   | [5. 验收标准](#5-验收标准) + [6. 交付物](#6-交付物清单)                                    |
+| 任务模块          | 任务 ID 范围     | 核心章节索引                                                                               |
+| :---------------- | :--------------- | :----------------------------------------------------------------------------------------- |
+| **Foundation**    | P1-1-1 ~ P1-1-9  | [4.1 Step 1: 环境部署](#41-step-1-环境部署与基础设施)                                      |
+| **Schema Design** | P1-2-1 ~ P1-2-14 | [3. 架构设计](#3-架构设计unified-schema) / [4.2 Schema 部署](#42-step-2-schema-设计与部署) |
+| **Pulse Engine**  | P1-3-1 ~ P1-3-17 | [4.3 核心实现](#43-step-3-pulse-engine-核心实现)                                           |
+| **Event Bridge**  | P1-5-1 ~ P1-5-5  | [4.4 AG-UI 事件桥接](#44-step-4-ag-ui-事件桥接层)                                          |
+| **Verification**  | P1-4-1 ~ P1-4-4  | [4.5 测试](#45-step-5-测试) / [5. Phase 1 验证 SOP](#5-phase-1-验证-sop)                   |
 
-### 1.4 工期规划
+#### 1.3.2 工期规划 (3 Days)
 
-| 阶段 | 任务模块          | 任务 ID          | 预估工期 | 交付物                             |
-| :--- | :---------------- | :--------------- | :------- | :--------------------------------- |
-| 1.1  | 环境部署          | P1-1-1 ~ P1-1-9  | 0.5 Day  | PostgreSQL 16+ 环境就绪            |
-| 1.2  | Schema 设计       | P1-2-1 ~ P1-2-14 | 0.5 Day  | `agent_schema.sql`                 |
-| 1.3  | Pulse Engine 实现 | P1-3-1 ~ P1-3-17 | 1 Day    | `StateManager`, `PgNotifyListener` |
-| 1.4  | 测试与验收        | P1-4-1 ~ P1-4-4  | 0.5 Day  | 测试报告 + 技术文档                |
+| 阶段 | 任务模块          | 任务 ID          | 预估工期 | 关键交付物 (Deliverables)           |
+| :--- | :---------------- | :--------------- | :------- | :---------------------------------- |
+| 1.1  | 环境部署          | P1-1-1 ~ P1-1-9  | 0.5 Day  | PostgreSQL 16+ (pgvector/pg_cron)   |
+| 1.2  | Schema 设计       | P1-2-1 ~ P1-2-14 | 0.5 Day  | `agent_schema.sql` (Unified Model)  |
+| 1.3  | Pulse Engine 实现 | P1-3-1 ~ P1-3-17 | 1.0 Day  | `StateManager` / `PgNotifyListener` |
+| 1.4  | AG-UI 事件桥接    | P1-5-1 ~ P1-5-5  | 0.5 Day  | `EventBridge` / `StateDebugService` |
+| 1.5  | 全链路验收        | P1-4-1 ~ P1-4-4  | 0.5 Day  | 自动化测试报告 / 技术白皮书         |
 
 ---
 
-## 2. 技术调研：ADK SessionService 深度分析
+## 2. 核心参考模型：Google ADK 契约与规范
 
-### 2.1 ADK Session 数据结构
+### 2.1 模型定位
 
-基于 ADK 源码分析<sup>[[2]](#ref2)</sup>，`Session` 对象的核心结构如下：
+本节定义了 Pulse Engine 必须遵循的 **Normative Reference Model (规范性参考模型)**。我们的设计并非凭空创造，而是通过严格复刻 Google GenAI ADK 的 `SessionService` 契约，确保系统具备行业标准的可扩展性与互操作性。
 
-```python
-# ADK Session 核心结构 (简化版)
-@dataclass
-class Session:
-    """代表一次用户-Agent 的交互会话"""
+### 2.2 ADK 核心对象建模
 
-    # 标识符
-    id: str                    # 会话唯一标识 (UUID)
-    app_name: str              # 应用名称
-    user_id: str               # 用户标识
+基于 ADK 源码<sup>[[2]](#ref2)</sup>，我们建立了如下对象关系模型，直接指导后续 Schema 设计：
 
-    # 状态数据
-    state: dict[str, Any]      # Key-Value 状态存储
+```mermaid
+classDiagram
+    direction LR
+    class Session {
+        +UUID id - 会话 ID
+        +String app_name - 应用名称
+        +String user_id - 用户标识
+        +Dict state - 状态数据
+        +List~Event~ events - 事件历史
+        +Float last_update_time - 最后更新时间
+    }
 
-    # 事件历史
-    events: list[Event]        # 交互事件序列 (append-only)
+    class Event {
+        +UUID id - 事件 ID
+        +String invocation_id - Trace ID
+        +String author - 事件作者
+        +Content content - 消息内容
+        +EventActions actions - 副作用
+        +Float timestamp - 时间戳
+    }
 
-    # 元数据
-    last_update_time: float    # 最后更新时间戳
+    class SessionService {
+        <<Interface>>
+        +create_session() - 创建会话
+        +get_session() - 获取会话
+        +append_event() - 追加事件
+    }
+
+    Session "1" *-- "0..*" Event : contains >
+    SessionService ..> Session : manages >
 ```
 
-### 2.2 ADK Event 数据结构
+### 2.3 核心数据结构契约
 
-`Event` 是 ADK 中记录交互的原子单元：
+#### 2.3.1 Session (会话容器)
+
+`Session` 是状态管理的主体容器，对应数据库中的 `threads` 表：
+
+```python
+@dataclass
+class Session:
+    """
+    Session Scope: 长期记忆容器
+    Mapped to: table `threads`
+    """
+    id: str                    # Primary Key
+    app_name: str              # Partition Key (Tenant)
+    user_id: str               # Partition Key (User)
+
+    # State Container (JSONB)
+    # 关键：通过 version 字段实现 OCC (Optimistic Concurrency Control)
+    state: dict[str, Any]
+
+    events: list[Event]        # Event Sourcing History
+```
+
+#### 2.3.2 Event (原子事件)
+
+`Event` 是不可变的交互记录，对应数据库中的 `events` 表：
 
 ```python
 @dataclass
 class Event:
-    """交互中的原子操作记录"""
+    """
+    Append-Only Ledger: 交互历史账本
+    Mapped to: table `events`
+    """
+    id: str
+    invocation_id: str         # Trace ID for Observability
+    author: str                # 'user' | 'model' | 'tool'
 
-    # 标识符
-    id: str                    # 事件唯一标识
-    invocation_id: str         # 调用标识 (一次用户请求)
-    author: str                # 事件作者 (user/agent/tool)
-
-    # 内容
-    content: Content           # 消息内容 (文本/多模态)
-
-    # 动作
-    actions: EventActions      # 状态变更、工具调用等
-
-    # 时间戳
-    timestamp: float           # 事件发生时间
+    content: Content           # Payload (Text/Image/...)
+    actions: EventActions      # Side Effects
 ```
 
-### 2.3 ADK SessionService 接口契约
+### 2.4 服务接口契约 (Interface Contract)
 
-我们需要实现的核心接口：
+`OpenSessionService` 必须完整实现以下抽象基类定义的操作原语：
 
 ```python
 class BaseSessionService(ABC):
-    """Session 管理服务抽象基类"""
+    """
+    Core Abstraction: 状态管理服务标准接口
+    """
 
     @abstractmethod
     async def create_session(
@@ -192,7 +238,7 @@ class BaseSessionService(ABC):
         user_id: str,
         state: dict | None = None
     ) -> Session:
-        """创建新会话"""
+        """初始化会话上下文"""
         ...
 
     @abstractmethod
@@ -202,7 +248,7 @@ class BaseSessionService(ABC):
         user_id: str,
         session_id: str
     ) -> Session | None:
-        """获取会话"""
+        """获取强一致性会话快照"""
         ...
 
     @abstractmethod
@@ -230,26 +276,128 @@ class BaseSessionService(ABC):
         session: Session,
         event: Event
     ) -> Event:
-        """追加事件并应用 state_delta"""
+        """
+        核心原子操作：
+        1. 持久化 Event
+        2. 应用 State Delta
+        3. 验证 OCC Version
+        """
         ...
 ```
 
-### 2.4 关键行为分析
+### 2.5 前端集成规范：AG-UI 事件桥接
+
+> [!NOTE]
+>
+> **Protocol Alignment (协议对齐)**：本节定义 The Pulse 与 AG-UI 可视化层之间的 **Event Bridge Protocol (事件桥接协议)**，确保状态变更与交互事件能够以毫秒级延迟实时投影到前端。
+>
+> **参考资源**：
+>
+> - [AG-UI 协议调研](../research/070-ag-ui.md)
+> - [AG-UI 官方文档](https://docs.ag-ui.com/)
+
+#### 2.5.1 事件流架构概览
+
+```mermaid
+graph BT
+    subgraph "Pulse Engine - Storage"
+        TH[threads 表]
+        EV[events 表]
+        RN[runs 表]
+    end
+
+    subgraph "Events Bridge Layer"
+        PNL[PgNotifyListener<br>PG 监听器]
+        EB[EventBridge<br>事件桥接器]
+        SER[SSE Endpoint<br>推送端点]
+    end
+
+    subgraph "UI Layer (AG-UI)"
+        CK[CopilotKit<br>SDK]
+        UI[Visualization<br>可视化组件]
+    end
+
+    EV -->|NOTIFY: agent_events| PNL
+    TH -->|NOTIFY: state_delta| PNL
+    PNL --> EB
+    EB -->|Transform| SER
+    SER -->|Server-Sent Events| CK
+    CK --> UI
+
+    style EB fill:#4ade80,stroke:#16a34a,color:#000
+    style PNL fill:#fcd34d,stroke:#f59e0b,color:#000
+```
+
+> [!TIP]
+>
+> **Metaphor: The Pulse of the System (系统脉搏)**
+>
+> 可以将整个架构想象成一个生命体监测系统：
+>
+> - **心脏 (Heart)**: `Pulse Engine` (PostgreSQL)，每一次数据变更 (`INSERT/UPDATE`) 就像一次心脏跳动。
+> - **脉搏波 (Pulse Wave)**: `NOTIFY` 机制，将心脏的跳动信号实时传导出去。
+> - **监护仪 (Monitor)**: `EventBridge`，捕捉微弱的脉搏信号，将其转化为可视化的波形数据 (AG-UI Events)。
+> - **屏幕 (Display)**: `AG-UI` 前端，实时显示生命体征，让用户看见系统的"存活"状态。
+
+#### 2.5.2 事件映射契约 (Event Mapping Contract)
+
+Pulse 产生的内部事件必须通过 `EventBridge` 转换为标准的 AG-UI 协议格式：
+
+| Pulse Source | Trigger Condition        | AG-UI Event Type       | Payload Schema (Lite)        |
+| :----------- | :----------------------- | :--------------------- | :--------------------------- |
+| `runs`       | INSERT (Link Start)      | `RUN_STARTED`          | `{ run_id, thread_id }`      |
+| `runs`       | UPDATE (Finalized)       | `RUN_FINISHED`         | `{ run_id, status, error? }` |
+| `events`     | INSERT (Role=user/agent) | `TEXT_MESSAGE_START`   | `{ message_id, role }`       |
+| `events`     | INSERT (Chunk Delta)     | `TEXT_MESSAGE_CONTENT` | `{ delta_content }`          |
+| `threads`    | UPDATE (State Change)    | `STATE_DELTA`          | `{ json_patch_diff }`        |
+| `events`     | INSERT (Tool Call)       | `TOOL_CALL_START`      | `{ tool_name, args_json }`   |
+
+### 2.6 状态一致性模型 (Consistency Model)
+
+#### 2.6.1 事务边界与可见性 (Transaction & Visibility)
 
 > [!IMPORTANT]
 >
-> **State Commit Timing (状态提交时机)**
+> **Read-Your-Writes Constraint (写后读约束)**
 >
-> 根据 ADK 文档<sup>[[3]](#ref3)</sup>，`state_delta` 仅在 Event 被 Runner 处理后才提交。这意味着：
->
-> - 执行逻辑在 yield Event **之后**才能看到其对 State 的更改生效
-> - 这类似数据库事务的 "read-your-writes" 保证需要等待 commit
+> 根据 ADK 规范<sup>[[3]](#ref3)</sup>，状态变更 (`state_delta`) 仅在 `Event` 持久化事务提交后才对全局可见。这引入了**Visibility Latency (可见性延迟)**。
 
-> [!WARNING]
+- **Rule 1 (Persist-then-Visible)**: 任何 Agent 逻辑产生的状态变更，必须在 `yield Event` 被 Runner 捕获并 commit 到 DB 后，才能被新的 Session `get()` 操作读取。
+- **Engineering Pitfall**: "Airborne State" —— 开发者常错误地认为 `yield UpdateState(...)` 后，内存中的 `state` 对象会立即更新。实际上，在事务落地前，该指令处于“飞行中”状态，本地读取仍只能获取旧值。
+
+**⚠️ 常见代码误区 (The "Airborne" Trap)**
+
+```python
+# ❌ 错误的直觉：认为 yield 后状态立刻改变
+def my_agent_logic():
+    # 1. 发出指令：更新计数
+    yield UpdateState(key="count", value=100)
+
+    # 2. 立刻读取
+    # 此时指令还在“空中飞” (Airborne)，Runner 尚未落地执行
+    # 这里的 state.count 仍然是旧值（例如 0）
+    if state.count == 100:
+       logger.info("Success") # 永远不会执行！
+```
+
+#### 2.6.2 易失性状态与叠加视图 (Overlay View)
+
+为解决上述延迟问题，并在长链路调用（Invocation）中支持连续的状态依赖，Pulse Engine 必须在内存中维护一个叠加视图。
+
+> [!TIP]
 >
-> **Dirty Reads 风险**
+> **Analogy: The Scratchpad (草稿纸机制)**
 >
-> 在同一 Invocation 内，后续的 Agent/Tool 可以看到之前修改但**尚未最终 Commit** 的 State。我们的实现需要处理这种乐观机制。
+> - **Scenario**: 考试（Invocation）过程中，你在草稿纸（Memory Overlay）上写下中间步骤。
+> - **Requirement**: 下一题计算必须能直接引用草稿纸上的结果，而不需要等待考试结束（Commit）后再去查阅试卷。
+> - **Risk**: 如果考试中途被终止（Crash），草稿纸内容丢弃，不污染正式试卷（Database）。
+
+**核心实现要求**：
+`StateManager` 必须实现 **Overlay Read** 机制：
+
+$$
+    State*{effective} = State*{persistent} + \sum Delta\_{pending}
+$$
 
 ---
 
@@ -259,7 +407,8 @@ class BaseSessionService(ABC):
 
 > [!NOTE]
 >
-> **设计原则**：严格对标 roadmap 1.1 中的 Schema 要求，实现 7 张核心表的统一存储架构。
+> **Design Principles**: Protocol-First, Unified Storage, Event-Driven.
+> 采用 "7 Tables + 2 Triggers" 的架构，实现 ADK Session 协议的完整持久化。
 
 ```mermaid
 erDiagram
@@ -267,6 +416,10 @@ erDiagram
     threads ||--o{ runs : has
     threads ||--o{ messages : stores
     threads ||--o{ snapshots : checkpoints
+
+    %% Real-time Mechanism
+    events ||--|| trigger_notify : "1. INSERT triggers"
+    trigger_notify ||--|| pg_notify : "2. Calls payload"
 
     threads {
         uuid id PK "会话唯一标识"
@@ -336,2273 +489,616 @@ erDiagram
     }
 ```
 
-### 3.2 表职责说明
+**Schema 规格说明 (Schema Specification)**：
 
-| 表名            | 职责                         | 对标 ADK 概念  | 生命周期   |
-| :-------------- | :--------------------------- | :------------- | :--------- |
-| **threads**     | 会话容器，存储用户级交互历史 | `Session`      | 持久化     |
-| **events**      | 不可变事件流 (append-only)   | `Event`        | 持久化     |
-| **runs**        | 临时执行链路 (Thinking Loop) | `Invocation`   | 执行期间   |
-| **messages**    | 带 Embedding 的消息内容      | `Content`      | 持久化     |
-| **snapshots**   | 状态检查点，用于快速恢复     | `Checkpoint`   | 按策略清理 |
-| **user_states** | `user:` 前缀状态             | `user:*` State | 持久化     |
-| **app_states**  | `app:` 前缀状态              | `app:*` State  | 持久化     |
+| Table           | Responsibilities  | Core Spec & Features                                                   | Key Constraints / Indexes                                   |
+| :-------------- | :---------------- | :--------------------------------------------------------------------- | :---------------------------------------------------------- |
+| **threads**     | Session Container | **OCC Check**: `version` field<br>**Data**: `state` (JSONB)            | Unique: `(app, user, id)`<br>Idx: `(app, user)`             |
+| **events**      | Immutable Stream  | **Trigger**: `notify_event_insert`<br>**Type**: Append-only Log        | Idx: `(thread_id, sequence_num)`<br>FK: `ON DELETE CASCADE` |
+| **runs**        | Execution Loop    | **Observability**: `thinking_steps`<br>**Status**: Async State Machine | Idx: `(thread_id)`, `(status)`                              |
+| **messages**    | Semantic Content  | **AI Ready**: `vector(1536)` field<br>**Role**: user / assistant       | Idx: `(thread_id)`, `(role)`<br>_(Phase 2: HNSW Index)_     |
+| **snapshots**   | State Checkpoints | **Recovery**: Fast-forward restore<br>**Freq**: Per N events / Runs    | Unique: `(thread_id, version)`                              |
+| **user_states** | User Persistence  | **Scope**: Cross-session memory<br>**Query**: GIN Indexing             | PK: `(user_id, app_name)`<br>Idx: `GIN(state)`              |
+| **app_states**  | Global Config     | **Scope**: App-level config<br>**Query**: GIN Indexing                 | PK: `(app_name)`<br>Idx: `GIN(state)`                       |
 
-### 3.3 核心表设计
+### 3.2 系统交互设计 (System Interaction)
 
-#### 3.2.1 threads 表 (会话容器)
+> [!TIP]
+>
+> **Data Flow**: `Transaction (Write + Update) -> Notify -> Bridge -> Push`
+> 本节描述从事件产生到端到端推送的完整时序。**注意：所有的状态变更通知都是由 `events` 表的插入触发的。**
 
-```sql
--- threads: 用户会话容器
-CREATE TABLE IF NOT EXISTS threads (
-    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    app_name        VARCHAR(255) NOT NULL,
-    user_id         VARCHAR(255) NOT NULL,
+```mermaid
+sequenceDiagram
+    participant User
+    participant API as Pulse API
+    participant DB as PostgreSQL
+    participant L as PgNotifyListener
+    participant B as EventBridge
+    participant UI as AG-UI (Client)
 
-    -- 会话状态 (无前缀作用域)
-    state           JSONB NOT NULL DEFAULT '{}',
+    User->>API: 1. Send Message / Action
 
-    -- 乐观锁版本号 (OCC)
-    version         INTEGER NOT NULL DEFAULT 1,
+    rect rgb(35, 40, 50)
+        note right of API: Database Transaction
+        API->>DB: 2a. INSERT into events (Generic Event)
+        activate DB
+        Note right of DB: Trigger: notify_event_insert
+        API->>DB: 2b. UPDATE threads (State Change)
+        DB-->>L: 3. NOTIFY 'agent_events' (Payload)
+        DB-->>API: 4. Commit & Return Success
+        deactivate DB
+    end
 
-    -- 元数据
-    metadata        JSONB DEFAULT '{}',
+    L->>B: 5. Parse Payload & Dispatch
+    activate B
+    B->>B: 6. Transform to AG-UI Event format
+    B->>UI: 7. Push Event (SSE / WebSocket)
+    deactivate B
 
-    -- 时间戳
-    created_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    updated_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-
-    -- 约束
-    CONSTRAINT threads_app_user_unique UNIQUE (app_name, user_id, id)
-);
-
--- 索引
-CREATE INDEX idx_threads_app_user ON threads(app_name, user_id);
-CREATE INDEX idx_threads_updated_at ON threads(updated_at DESC);
+    UI->>User: 8. Render Update
 ```
 
-#### 3.2.2 events 表 (不可变事件流)
+### 3.3 状态管理与 OCC 机制
+
+> [!IMPORTANT]
+>
+> **乐观并发控制 (OCC)**：为了防止多 Agent 同时修改状态导致的数据覆盖，我们引入 `version` 字段进行 CAS (Compare-And-Swap) 控制。
+> **关键点**：`state` 的更新必须与记录该变更的 `event` 在同一个事务中提交。
+
+**核心逻辑 (Atomic Transaction)**：
 
 ```sql
--- events: 不可变事件流 (append-only)
-CREATE TABLE IF NOT EXISTS events (
-    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    thread_id       UUID NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
-    invocation_id   UUID NOT NULL,
+BEGIN;
 
-    -- 事件元数据
-    author          VARCHAR(50) NOT NULL,  -- 'user', 'agent', 'tool'
-    event_type      VARCHAR(50) NOT NULL,  -- 'message', 'tool_call', 'state_update'
+-- 1. 尝试更新状态 (CAS)
+UPDATE threads
+SET
+  state = state || $new_state,
+  version = version + 1
+WHERE
+  id = $thread_id AND version = $expected_version
+RETURNING version; -- 如果返回空，说明版本不匹配（冲突）
 
-    -- 事件内容
-    content         JSONB NOT NULL DEFAULT '{}',
+-- 2. 插入事件 record (触发 Notify)
+INSERT INTO events (thread_id, event_type, content)
+VALUES ($thread_id, 'state_update', $new_state);
 
-    -- 事件动作 (state_delta, tool_calls 等)
-    actions         JSONB DEFAULT '{}',
-
-    -- 时间戳
-    created_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-
-    -- 序列号 (用于排序)
-    sequence_num    BIGSERIAL
-);
-
--- 索引
-CREATE INDEX idx_events_thread_id ON events(thread_id);
-CREATE INDEX idx_events_invocation_id ON events(invocation_id);
-CREATE INDEX idx_events_sequence ON events(thread_id, sequence_num);
+COMMIT;
 ```
 
-#### 3.2.3 runs 表 (执行链路)
+**状态流转图**：
 
-```sql
--- runs: 临时执行链路 (Thinking Loop)
-CREATE TABLE IF NOT EXISTS runs (
-    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    thread_id       UUID NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+```mermaid
+stateDiagram-v2
+    direction LR
+    [*] --> Reading: Get Session
+    Reading --> Computing: Logic Execution
+    Computing --> Transaction: Begin Tx
 
-    -- 执行状态
-    status          VARCHAR(20) NOT NULL DEFAULT 'pending',
-    -- CHECK (status IN ('pending', 'running', 'completed', 'failed', 'cancelled'))
+    state Transaction {
+        [*] --> UpdateState
+        UpdateState --> Checks: RETURNING version
+        Checks --> InsertEvent: Success
+        Checks --> Conflict: Empty Result
+    }
 
-    -- 思考步骤 (用于可观测性)
-    thinking_steps  JSONB DEFAULT '[]',
-
-    -- 错误信息
-    error           TEXT,
-
-    -- 时间戳
-    started_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    completed_at    TIMESTAMP WITH TIME ZONE
-);
-
--- 索引
-CREATE INDEX idx_runs_thread_id ON runs(thread_id);
-CREATE INDEX idx_runs_status ON runs(status);
+    InsertEvent --> [*]: Commit & Notify
+    Conflict --> Retry: Rollback & Reload
+    Retry --> Computing
 ```
+
+### 3.4 Schema 部署
+
+参见：[`src/cognizes/engine/schema/agent_schema.sql`](../../src/cognizes/engine/schema/agent_schema.sql)
 
 ---
 
-## 4. 实施计划：分步执行指南
+## 4. 实施指南
 
 ### 4.1 Step 1: 环境部署与基础设施
 
-#### 4.1.1 PostgreSQL 生态部署
+> [!TIP]
+>
+> **Metaphor: 夯实地基 (Building the Foundation)**
+>
+> 在开始编码前，我们需要先整理好土壤 (DB)、搭建好脚手架 (Python Env) 并拿到钥匙 (Secrets)。
+
+#### 4.1.1 The Soil: PostgreSQL 生态部署
+
+**核心目标**：为 Pulse Engine 准备肥沃的土壤。
 
 **任务清单**：
 
-| 任务 ID | 任务描述             | 验收标准                        | 参考命令                     |
-| :------ | :------------------- | :------------------------------ | :--------------------------- |
-| P1-1-1  | 部署 PostgreSQL 16+  | `SELECT version()` 返回 16.x+   | `brew install postgresql@16` |
-| P1-1-2  | 安装 pgvector 0.7.0+ | `CREATE EXTENSION vector` 成功  | 见下方安装指南               |
-| P1-1-3  | 安装 pg_cron         | `SELECT * FROM cron.job` 可执行 | 见下方安装指南               |
-| P1-1-4  | 配置连接池           | 支持 100+ 并发连接              | PgBouncer 或内置配置         |
+| 任务 ID | 任务描述     | 验收标准                   | 参考命令                     |
+| :------ | :----------- | :------------------------- | :--------------------------- |
+| P1-1-1  | 部署 PG 16+  | `SELECT version()` 16.x+   | `brew install postgresql@16` |
+| P1-1-2  | 初始化数据库 | 库 `cognizes-engine` 存在  | `createdb cognizes-engine`   |
+| P1-1-3  | 安装扩展     | `vector`, `uuid-ossp` 就绪 | 见下文安装指南               |
+| P1-1-4  | 安装 pg_cron | 定时任务调度器就绪         | 见下文安装指南               |
 
-**pgvector 安装指南**：
+**关键安装指南**：
 
 ```bash
-# macOS (Homebrew)
-brew install pgvector
+# 1. 基础安装 (macOS)
+brew install postgresql@16 pgvector
+brew services start postgresql@16
 
-# 或从源码编译
-git clone https://github.com/pgvector/pgvector.git
-cd pgvector
-make
-make install
+# 2. 创建数据库 (The Container)
+createdb cognizes-engine
 
-# 在 PostgreSQL 中启用
-psql -d your_database -c "CREATE EXTENSION IF NOT EXISTS vector;"
+# 3. 启用基础扩展 (The Nutrients)
+psql -d cognizes-engine -c "CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\";"
+psql -d cognizes-engine -c "CREATE EXTENSION IF NOT EXISTS vector;"
 ```
 
-**pg_cron 安装指南 (源码编译)**：
+**pg_cron (The Clock) 深度部署指南**：
 
-> [!TIP]
+> [!IMPORTANT]
 >
-> **macOS 编译异常修复**
->
-> 在 Apple Silicon (M1/M2/M3) 环境下编译 `pg_cron` 时，常遇到链接器错误：
-> `Undefined symbols for architecture arm64: "_libintl_ngettext"`
->
-> **原因**: 链接器未能找到 `gettext` 国际化库。
-> **修复**: 需在 Makefile 中显式链接 `libintl`。修改 `Makefile` 第 22 行左右：
-> 原文: `SHLIB_LINK = $(libpq)`
-> 修改: `SHLIB_LINK = $(libpq) -L/opt/homebrew/opt/gettext/lib -lintl`
+> **Prerequisite: The Heartbeat Mechanism**
+> `pg_cron` 作为系统的后台调度器，必需在 `postgresql.conf` 中预加载 (`shared_preload_libraries`) 才能启动其后台进程。
+
+**关键路径：源码编译与配置 (macOS)**
+
+1. **修正编译参数 (Apple Silicon Only)**
+   - **现象**: 链接报错 `Undefined symbols: _libintl_ngettext`。
+   - **对策**: 编辑 `Makefile` (约第 22 行)，显式链接 `gettext` 库：
+     ```make
+     # Old: SHLIB_LINK = $(libpq)
+     SHLIB_LINK = $(libpq) -L/opt/homebrew/opt/gettext/lib -lintl
+     ```
+
+2. **执行安装流水线**
+
+   ```bash
+   # 1. Build & Install
+   git clone https://github.com/citusdata/pg_cron.git && cd pg_cron
+   # (Execute Makefile fix here if on M1/M2/M3)
+   export PATH="/opt/homebrew/opt/postgresql@16/bin:$PATH"
+   make clean && make && make install
+
+   # 2. Config (Find path: psql -c "SHOW config_file;")
+   # Add to postgresql.conf:
+   # shared_preload_libraries = 'pg_cron'
+   # cron.database_name = 'cognizes-engine'
+
+   # 3. Restart & Enable
+   brew services restart postgresql@16
+   psql -d postgres -c "CREATE EXTENSION IF NOT EXISTS pg_cron;"
+   ```
+
+#### 4.1.2 The Scaffold: 开发环境配置
+
+**核心目标**：搭建稳固的 Python 开发脚手架。
 
 ```bash
-# 1. 下载源码 (推荐使用稳定版分支)
-git clone https://github.com/citusdata/pg_cron.git
-cd pg_cron
-
-# 2. 修复 Makefile 链接问题 (macOS 必需，见上 Tip)
-# 或手动修改 Makefile 追加 -lintl 参数
-
-# 3. 编译与安装 (需确保 pg_config 指向目标 PG 版本)
-export PATH="/opt/homebrew/opt/postgresql@16/bin:$PATH"
-make clean
-make && make install
-
-# 4. 修改 postgresql.conf 配置
-# 路径通常在 /opt/homebrew/var/postgresql@16/postgresql.conf
-# 追加内容：
-# shared_preload_libraries = 'pg_cron'
-# cron.database_name = 'cognizes-engine'
-
-# 5. 重启 PostgreSQL
-brew services restart postgresql@16
-
-# 6. 在目标数据库中启用扩展
-psql -d postgres -c "CREATE EXTENSION IF NOT EXISTS pg_cron;"
-```
-
-> [!TIP]
->
-> **配置详解**
->
-> 1. **配置文件路径**: macOS 上通常位于 `/opt/homebrew/var/postgres@18/postgresql.conf` (Apple Silicon)。可通过 `psql -c "SHOW config_file;"` 精确查找。
-> 2. **`shared_preload_libraries = 'pg_cron'`**: 启动 `pg_cron` 的后台调度进程 (Background Worker)。如果不设置，扩展仅加载函数但调度器不运行。修改后必须重启 PG。
-> 3. **`cron.database_name`**: 指定存储 cron 元数据 (任务列表) 的主数据库。若不设置，默认只能在 `postgres` 库中管理任务。
-
-#### 4.1.2 开发环境配置
-
-**Python 环境**：
-
-```bash
-# 创建项目目录结构
-mkdir -p src/cognizes/engine/pulse
-mkdir -p src/cognizes/engine/schema
-mkdir -p tests/pulse
-
-# 创建虚拟环境
-# python -m venv .venv
-# source .venv/bin/activate
+# 1. 初始化项目 (The Frame)
+mkdir -p src/cognizes/engine/{pulse,schema} tests/pulse
 uv init --no-workspace .
 
-# 安装依赖
-uv add asyncpg 'psycopg[binary]' google-adk pydantic pytest pytest-asyncio
+# 2. 安装依赖 (The Tools)
+# Core: asyncpg (Driver), pydantic (Validation)
+# SDK: google-adk (Protocol)
+uv add asyncpg 'psycopg[binary]' google-adk pydantic
+uv add --dev pytest pytest-asyncio
 ```
 
-**依赖清单** (`pyproject.toml`):
+#### 4.1.3 The Keys: 配置与密钥管理
 
-```toml
-dependencies = [
-    # Core
-    "asyncpg>=0.31.0",
-    "psycopg[binary]>=3.3.2",
-    "pydantic>=2.12.5",
+**核心目标**：注入启动引擎所需的燃料。
 
-    # Google ADK
-    "google-adk>=1.22.0",
-
-    # Testing
-    "pytest>=9.0.2",
-    "pytest-asyncio>=1.3.0",
-
-    # Utilities
-    # "python-dotenv>=1.2.1",
-]
-```
-
-### 4.2 Step 2: Schema 设计与部署
-
-#### 4.2.1 完整 Schema 脚本
-
-创建 `src/cognizes/engine/schema/agent_schema.sql`:
-
-```sql
--- ============================================
--- Agentic AI Engine - Unified Schema
--- Version: 1.0
--- Target: PostgreSQL 16+ with pgvector
--- ============================================
-
--- 启用扩展
-CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
-CREATE EXTENSION IF NOT EXISTS "vector";
-
--- ============================================
--- 1. threads 表 (会话容器)
--- ============================================
-CREATE TABLE IF NOT EXISTS threads (
-    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    app_name        VARCHAR(255) NOT NULL,
-    user_id         VARCHAR(255) NOT NULL,
-    state           JSONB NOT NULL DEFAULT '{}',
-    version         INTEGER NOT NULL DEFAULT 1,
-    metadata        JSONB DEFAULT '{}',
-    created_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    updated_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    CONSTRAINT threads_app_user_unique UNIQUE (app_name, user_id, id)
-);
-
-CREATE INDEX IF NOT EXISTS idx_threads_app_user ON threads(app_name, user_id);
-CREATE INDEX IF NOT EXISTS idx_threads_updated_at ON threads(updated_at DESC);
-
--- ============================================
--- 2. events 表 (不可变事件流)
--- ============================================
-CREATE TABLE IF NOT EXISTS events (
-    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    thread_id       UUID NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
-    invocation_id   UUID NOT NULL,
-    author          VARCHAR(50) NOT NULL,
-    event_type      VARCHAR(50) NOT NULL,
-    content         JSONB NOT NULL DEFAULT '{}',
-    actions         JSONB DEFAULT '{}',
-    created_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    sequence_num    BIGSERIAL
-);
-
-CREATE INDEX IF NOT EXISTS idx_events_thread_id ON events(thread_id);
-CREATE INDEX IF NOT EXISTS idx_events_invocation_id ON events(invocation_id);
-CREATE INDEX IF NOT EXISTS idx_events_sequence ON events(thread_id, sequence_num);
-
--- ============================================
--- 3. runs 表 (执行链路)
--- ============================================
-CREATE TABLE IF NOT EXISTS runs (
-    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    thread_id       UUID NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
-    status          VARCHAR(20) NOT NULL DEFAULT 'pending',
-    -- CHECK (status IN ('pending', 'running', 'completed', 'failed', 'cancelled'))
-    thinking_steps  JSONB DEFAULT '[]',
-    tool_calls      JSONB DEFAULT '[]',  -- 工具调用记录
-    error           TEXT,
-    started_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    completed_at    TIMESTAMP WITH TIME ZONE
-);
-
-CREATE INDEX IF NOT EXISTS idx_runs_thread_id ON runs(thread_id);
-CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status);
-
--- ============================================
--- 4. messages 表 (带 Embedding 的消息内容)
--- ============================================
-CREATE TABLE IF NOT EXISTS messages (
-    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    thread_id       UUID NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
-    event_id        UUID REFERENCES events(id) ON DELETE SET NULL,
-
-    -- 消息元数据
-    role            VARCHAR(20) NOT NULL,  -- 'user', 'assistant', 'tool', 'system'
-
-    -- 消息内容
-    content         TEXT NOT NULL,
-
-    -- 向量嵌入 (Phase 2 将使用)
-    embedding       vector(1536),  -- OpenAI text-embedding-3-small / Gemini embedding
-
-    -- 元数据
-    metadata        JSONB DEFAULT '{}',
-
-    -- 时间戳
-    created_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_messages_thread_id ON messages(thread_id);
-CREATE INDEX IF NOT EXISTS idx_messages_event_id ON messages(event_id);
-CREATE INDEX IF NOT EXISTS idx_messages_role ON messages(role);
--- HNSW 向量索引 (Phase 2 启用)
--- CREATE INDEX IF NOT EXISTS idx_messages_embedding ON messages USING hnsw (embedding vector_cosine_ops);
-
--- ============================================
--- 5. snapshots 表 (状态检查点)
--- ============================================
-CREATE TABLE IF NOT EXISTS snapshots (
-    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    thread_id       UUID NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
-
-    -- 快照版本 (与 threads.version 对应)
-    version         INTEGER NOT NULL,
-
-    -- 状态快照
-    state           JSONB NOT NULL,
-
-    -- 事件摘要 (可选，用于快速恢复)
-    events_summary  JSONB DEFAULT '{}',
-
-    -- 时间戳
-    created_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-
-    -- 每个 thread 的每个 version 只有一个快照
-    CONSTRAINT snapshots_thread_version_unique UNIQUE (thread_id, version)
-);
-
-CREATE INDEX IF NOT EXISTS idx_snapshots_thread_id ON snapshots(thread_id);
-CREATE INDEX IF NOT EXISTS idx_snapshots_created_at ON snapshots(created_at DESC);
-
--- ============================================
--- 6. user_states 表 (用户级持久状态)
--- ============================================
-CREATE TABLE IF NOT EXISTS user_states (
-    user_id         VARCHAR(255) NOT NULL,
-    app_name        VARCHAR(255) NOT NULL,
-    state           JSONB NOT NULL DEFAULT '{}',
-    updated_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    PRIMARY KEY (user_id, app_name)
-);
-
--- JSONB GIN 索引 (支持快速 key 查询)
-CREATE INDEX IF NOT EXISTS idx_user_states_state ON user_states USING GIN (state);
-
--- ============================================
--- 7. app_states 表 (应用级持久状态)
--- ============================================
-CREATE TABLE IF NOT EXISTS app_states (
-    app_name        VARCHAR(255) PRIMARY KEY,
-    state           JSONB NOT NULL DEFAULT '{}',
-    updated_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-);
-
--- JSONB GIN 索引
-CREATE INDEX IF NOT EXISTS idx_app_states_state ON app_states USING GIN (state);
-
--- ============================================
--- 8. NOTIFY 触发器 (实时事件流)
--- ============================================
-CREATE OR REPLACE FUNCTION notify_event_insert()
-RETURNS TRIGGER AS $$
-BEGIN
-    PERFORM pg_notify(
-        'event_stream',
-        json_build_object(
-            'event_id', NEW.id,
-            'thread_id', NEW.thread_id,
-            'author', NEW.author,
-            'event_type', NEW.event_type,
-            'created_at', NEW.created_at
-        )::text
-    );
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
-CREATE TRIGGER trigger_event_notify
-    AFTER INSERT ON events
-    FOR EACH ROW
-    EXECUTE FUNCTION notify_event_insert();
-
--- ============================================
--- 9. 自动更新 updated_at 触发器
--- ============================================
-CREATE OR REPLACE FUNCTION update_updated_at()
-RETURNS TRIGGER AS $$
-BEGIN
-    NEW.updated_at = NOW();
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
-CREATE TRIGGER trigger_threads_updated_at
-    BEFORE UPDATE ON threads
-    FOR EACH ROW
-    EXECUTE FUNCTION update_updated_at();
-```
-
-#### 4.2.2 Schema 部署验证
+**配置清单**：
 
 ```bash
-# 部署 Schema
-psql -d 'cognizes-engine' -f src/cognizes/engine/schema/agent_schema.sql
+# .env 文件模板
+# 1. Database Connection (Soil Access)
+DATABASE_URL="postgresql://user:pass@localhost:5432/cognizes-engine"
 
-# 验证表创建
-psql -d 'cognizes-engine' -c "\dt"
-
-# 验证触发器
-psql -d 'cognizes-engine' -c "\df notify_event_insert"
+# 2. Google ADK Auth (Identity)
+GOOGLE_API_KEY="your-gemini-api-key"
 ```
+
+**验证命令**：
+
+```bash
+uv run python -c "
+import os
+print(f'✓ DB:  {os.getenv(\"DATABASE_URL\", \"Not Set\")}')
+print(f'✓ Key: {os.getenv(\"GOOGLE_API_KEY\", \"Not Set\")[:5]}...')
+"
+```
+
+### 4.2 Step 2: The Blueprint - Schema 部署
+
+> [!TIP]
+>
+> **Metaphor: 绘制蓝图 (Drawing the Blueprint)**
+> 在土壤准备好后，我们需要在其中绘制数据的蓝图 (Schema)，定义 7 张核心表与 2 个触发器。
+
+**核心目标**：将 Unified Schema 物理化到数据库中。
+
+**部署流水线**：
+
+```bash
+# 1. Deploy (The Blueprint Execution)
+psql -d cognizes-engine -f src/cognizes/engine/schema/agent_schema.sql
+
+# 2. Verify Tables (7 Core Tables)
+psql -d cognizes-engine -c "\dt" | grep -E "threads|events|runs|messages|snapshots|user_states|app_states"
+
+# 3. Verify Triggers (The Pulse Mechanism)
+psql -d cognizes-engine -c "\df notify_event_insert"
+```
+
+**验收标准**：
+
+- ✓ 7 张表全部创建成功
+- ✓ `notify_event_insert` 触发器就绪
+- ✓ `update_updated_at` 触发器就绪
 
 ---
 
-### 4.3 Step 3: Pulse Engine 核心实现
+### 4.3 Step 3: The Heart - Pulse Engine 核心实现
 
-#### 4.3.1 StateManager 类实现
+> [!TIP]
+>
+> **Metaphor: 安装心脏 (Installing the Heart)**
+> Schema 是骨架，Pulse Engine 是跳动的心脏。它负责状态管理 (StateManager) 和脉搏传导 (PgNotifyListener)。
 
-创建 `src/cognizes/engine/pulse/state_manager.py`:
+#### 4.3.1 The State Keeper: StateManager 实现
 
-```python
-"""
-StateManager: 原子状态流转管理器
+**核心职责**：
 
-实现对标 Google ADK SessionService 的状态管理能力：
 - 原子状态流转 (Atomic State Transitions)
-- 乐观并发控制 (Optimistic Concurrency Control)
-- State 前缀作用域解析
-"""
+- 乐观并发控制 (OCC with Version Check)
+- 前缀作用域解析 (`user:`, `app:`, `temp:`)
 
-from __future__ import annotations
+**实现参考**：[`src/cognizes/engine/pulse/state_manager.py`](../../src/cognizes/engine/pulse/state_manager.py)
 
-import asyncio
-import uuid
-from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Any
+#### 4.3.2 The Pulse Conductor: PgNotifyListener 实现
 
-import asyncpg
+**核心职责**：
 
+- 监听 PostgreSQL `NOTIFY` 信号
+- 解析事件 Payload 并分发
+- 驱动 EventBridge 进行实时推送
 
-@dataclass
-class Session:
-    """会话对象 - 对标 ADK Session"""
+**实现参考**：[`src/cognizes/engine/pulse/pg_notify_listener.py`](../../src/cognizes/engine/pulse/pg_notify_listener.py)
 
-    id: str
-    app_name: str
-    user_id: str
-    state: dict[str, Any] = field(default_factory=dict)
-    version: int = 1
-    created_at: datetime | None = None
-    updated_at: datetime | None = None
+#### 4.3.3 The Gateway: WebSocket 推送接口
 
+**核心目标**：为前端提供实时事件流的订阅通道。
 
-@dataclass
-class Event:
-    """事件对象 - 对标 ADK Event"""
+**关键组件**：
 
-    id: str
-    thread_id: str
-    invocation_id: str
-    author: str  # 'user', 'agent', 'tool'
-    event_type: str  # 'message', 'tool_call', 'state_update'
-    content: dict[str, Any] = field(default_factory=dict)
-    actions: dict[str, Any] = field(default_factory=dict)
-    created_at: datetime | None = None
-
-
-class ConcurrencyConflictError(Exception):
-    """乐观锁冲突异常"""
-    pass
-
-
-class StateManager:
-    """
-    状态管理器 - 实现原子状态流转和乐观并发控制
-
-    核心职责：
-    1. Session CRUD 操作
-    2. 原子事务保证 (BEGIN...COMMIT)
-    3. 乐观锁 CAS (Compare-And-Set)
-    4. State 前缀解析
-    """
-
-    def __init__(self, pool: asyncpg.Pool):
-        self.pool = pool
-        self._temp_state: dict[str, dict] = {}  # temp: 前缀的内存缓存
-
-    # ========================================
-    # Session CRUD 操作
-    # ========================================
-
-    async def create_session(
-        self,
-        app_name: str,
-        user_id: str,
-        initial_state: dict[str, Any] | None = None
-    ) -> Session:
-        """创建新会话"""
-        session_id = str(uuid.uuid4())
-        state = initial_state or {}
-
-        async with self.pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """
-                INSERT INTO threads (id, app_name, user_id, state)
-                VALUES ($1, $2, $3, $4)
-                RETURNING id, app_name, user_id, state, version, created_at, updated_at
-                """,
-                uuid.UUID(session_id), app_name, user_id, state
-            )
-
-        return self._row_to_session(row)
-
-    async def get_session(
-        self,
-        app_name: str,
-        user_id: str,
-        session_id: str
-    ) -> Session | None:
-        """获取会话"""
-        async with self.pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """
-                SELECT id, app_name, user_id, state, version, created_at, updated_at
-                FROM threads
-                WHERE id = $1 AND app_name = $2 AND user_id = $3
-                """,
-                uuid.UUID(session_id), app_name, user_id
-            )
-
-        return self._row_to_session(row) if row else None
-
-    async def list_sessions(
-        self,
-        app_name: str,
-        user_id: str
-    ) -> list[Session]:
-        """列出用户所有会话"""
-        async with self.pool.acquire() as conn:
-            rows = await conn.fetch(
-                """
-                SELECT id, app_name, user_id, state, version, created_at, updated_at
-                FROM threads
-                WHERE app_name = $1 AND user_id = $2
-                ORDER BY updated_at DESC
-                """,
-                app_name, user_id
-            )
-
-        return [self._row_to_session(row) for row in rows]
-
-    async def delete_session(
-        self,
-        app_name: str,
-        user_id: str,
-        session_id: str
-    ) -> bool:
-        """删除会话"""
-        async with self.pool.acquire() as conn:
-            result = await conn.execute(
-                """
-                DELETE FROM threads
-                WHERE id = $1 AND app_name = $2 AND user_id = $3
-                """,
-                uuid.UUID(session_id), app_name, user_id
-            )
-
-        return result == "DELETE 1"
-
-    # ========================================
-    # 原子状态流转
-    # ========================================
-
-    async def append_event(
-        self,
-        session: Session,
-        event: Event
-    ) -> Event:
-        """
-        追加事件并原子性地应用 state_delta
-
-        这是 Pulse Engine 的核心方法，确保：
-        1. Event 追加和 State 更新在同一事务中
-        2. 乐观锁检查防止并发冲突
-        3. state_delta 正确应用到 session.state
-        """
-        state_delta = event.actions.get("state_delta", {})
-
-        async with self.pool.acquire() as conn:
-            async with conn.transaction():
-                # 1. 乐观锁检查 + 更新状态
-                if state_delta:
-                    new_state = {**session.state, **state_delta}
-                    result = await conn.fetchrow(
-                        """
-                        UPDATE threads
-                        SET state = $1, version = version + 1, updated_at = NOW()
-                        WHERE id = $2 AND version = $3
-                        RETURNING version
-                        """,
-                        new_state,
-                        uuid.UUID(session.id),
-                        session.version
-                    )
-
-                    if result is None:
-                        raise ConcurrencyConflictError(
-                            f"Session {session.id} version conflict. "
-                            f"Expected {session.version}, but it was modified."
-                        )
-
-                    # 更新本地 session 对象
-                    session.state = new_state
-                    session.version = result["version"]
-
-                # 2. 追加事件
-                event_id = str(uuid.uuid4())
-                row = await conn.fetchrow(
-                    """
-                    INSERT INTO events (id, thread_id, invocation_id, author, event_type, content, actions)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7)
-                    RETURNING id, created_at
-                    """,
-                    uuid.UUID(event_id),
-                    uuid.UUID(session.id),
-                    uuid.UUID(event.invocation_id),
-                    event.author,
-                    event.event_type,
-                    event.content,
-                    event.actions
-                )
-
-                event.id = str(row["id"])
-                event.created_at = row["created_at"]
-
-        return event
-
-    # ========================================
-    # 乐观并发控制 (OCC)
-    # ========================================
-
-    async def update_session_state(
-        self,
-        session: Session,
-        state_delta: dict[str, Any],
-        max_retries: int = 3
-    ) -> Session:
-        """
-        带重试的乐观锁状态更新
-
-        当检测到版本冲突时，自动重新加载最新状态并重试
-        """
-        for attempt in range(max_retries):
-            try:
-                # 构造一个 state_update 事件
-                event = Event(
-                    id="",
-                    thread_id=session.id,
-                    invocation_id=str(uuid.uuid4()),
-                    author="system",
-                    event_type="state_update",
-                    actions={"state_delta": state_delta}
-                )
-                await self.append_event(session, event)
-                return session
-
-            except ConcurrencyConflictError:
-                if attempt == max_retries - 1:
-                    raise
-
-                # 重新加载最新状态
-                session = await self.get_session(
-                    session.app_name,
-                    session.user_id,
-                    session.id
-                )
-                await asyncio.sleep(0.01 * (attempt + 1))  # 退避策略
-
-        return session
-
-    # ========================================
-    # State 前缀处理
-    # ========================================
-
-    def parse_state_prefix(self, key: str) -> tuple[str, str]:
-        """
-        解析 State Key 的前缀
-
-        Returns:
-            (prefix, actual_key): 前缀和实际的 key
-
-        Examples:
-            "user:language" -> ("user", "language")
-            "app:max_retries" -> ("app", "max_retries")
-            "temp:intermediate" -> ("temp", "intermediate")
-            "task_progress" -> ("session", "task_progress")
-        """
-        prefixes = ["user:", "app:", "temp:"]
-        for prefix in prefixes:
-            if key.startswith(prefix):
-                return prefix.rstrip(":"), key[len(prefix):]
-        return "session", key
-
-    async def set_state(
-        self,
-        session: Session,
-        key: str,
-        value: Any
-    ) -> None:
-        """
-        根据前缀设置状态值
-
-        - 无前缀: 存入 session.state
-        - user: 存入 user_states 表
-        - app: 存入 app_states 表
-        - temp: 存入内存缓存
-        """
-        prefix, actual_key = self.parse_state_prefix(key)
-
-        if prefix == "session":
-            await self.update_session_state(session, {actual_key: value})
-
-        elif prefix == "temp":
-            cache_key = f"{session.id}"
-            if cache_key not in self._temp_state:
-                self._temp_state[cache_key] = {}
-            self._temp_state[cache_key][actual_key] = value
-
-        elif prefix == "user":
-            await self._set_user_state(session.app_name, session.user_id, actual_key, value)
-
-        elif prefix == "app":
-            await self._set_app_state(session.app_name, actual_key, value)
-
-    async def _set_user_state(self, app_name: str, user_id: str, key: str, value: Any) -> None:
-        """设置用户级状态"""
-        async with self.pool.acquire() as conn:
-            await conn.execute(
-                """
-                INSERT INTO user_states (user_id, app_name, state, updated_at)
-                VALUES ($1, $2, jsonb_build_object($3, $4::jsonb), NOW())
-                ON CONFLICT (user_id, app_name)
-                DO UPDATE SET
-                    state = user_states.state || jsonb_build_object($3, $4::jsonb),
-                    updated_at = NOW()
-                """,
-                user_id, app_name, key, value
-            )
-
-    async def _set_app_state(self, app_name: str, key: str, value: Any) -> None:
-        """设置应用级状态"""
-        async with self.pool.acquire() as conn:
-            await conn.execute(
-                """
-                INSERT INTO app_states (app_name, state, updated_at)
-                VALUES ($1, jsonb_build_object($2, $3::jsonb), NOW())
-                ON CONFLICT (app_name)
-                DO UPDATE SET
-                    state = app_states.state || jsonb_build_object($2, $3::jsonb),
-                    updated_at = NOW()
-                """,
-                app_name, key, value
-            )
-
-    async def get_state(
-        self,
-        session: Session,
-        key: str,
-        default: Any = None
-    ) -> Any:
-        """
-        根据前缀获取状态值
-
-        - 无前缀: 从 session.state 读取
-        - user: 从 user_states 表读取
-        - app: 从 app_states 表读取
-        - temp: 从内存缓存读取
-        """
-        prefix, actual_key = self.parse_state_prefix(key)
-
-        if prefix == "session":
-            return session.state.get(actual_key, default)
-
-        elif prefix == "temp":
-            cache_key = f"{session.id}"
-            temp_state = self._temp_state.get(cache_key, {})
-            return temp_state.get(actual_key, default)
-
-        elif prefix == "user":
-            return await self._get_user_state(session.app_name, session.user_id, actual_key, default)
-
-        elif prefix == "app":
-            return await self._get_app_state(session.app_name, actual_key, default)
-
-        return default
-
-    async def _get_user_state(self, app_name: str, user_id: str, key: str, default: Any = None) -> Any:
-        """获取用户级状态"""
-        async with self.pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """
-                SELECT state->$3 as value
-                FROM user_states
-                WHERE user_id = $1 AND app_name = $2
-                """,
-                user_id, app_name, key
-            )
-        return row["value"] if row and row["value"] is not None else default
-
-    async def _get_app_state(self, app_name: str, key: str, default: Any = None) -> Any:
-        """获取应用级状态"""
-        async with self.pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """
-                SELECT state->$2 as value
-                FROM app_states
-                WHERE app_name = $1
-                """,
-                app_name, key
-            )
-        return row["value"] if row and row["value"] is not None else default
-
-    async def get_all_state(self, session: Session) -> dict[str, Any]:
-        """
-        获取会话的完整状态视图 (合并所有作用域)
-
-        返回格式: {
-            "session_key": value,           # 无前缀
-            "user:user_key": value,         # user: 前缀
-            "app:app_key": value,           # app: 前缀
-            "temp:temp_key": value          # temp: 前缀
-        }
-        """
-        result = {}
-
-        # Session scope (无前缀)
-        result.update(session.state)
-
-        # Temp scope
-        cache_key = f"{session.id}"
-        temp_state = self._temp_state.get(cache_key, {})
-        for k, v in temp_state.items():
-            result[f"temp:{k}"] = v
-
-        # User scope
-        async with self.pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT state FROM user_states WHERE user_id = $1 AND app_name = $2",
-                session.user_id, session.app_name
-            )
-            if row and row["state"]:
-                for k, v in row["state"].items():
-                    result[f"user:{k}"] = v
-
-        # App scope
-        async with self.pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT state FROM app_states WHERE app_name = $1",
-                session.app_name
-            )
-            if row and row["state"]:
-                for k, v in row["state"].items():
-                    result[f"app:{k}"] = v
-
-        return result
-
-    # ========================================
-    # 辅助方法
-    # ========================================
-
-    def _row_to_session(self, row: asyncpg.Record) -> Session:
-        """将数据库行转换为 Session 对象"""
-        return Session(
-            id=str(row["id"]),
-            app_name=row["app_name"],
-            user_id=row["user_id"],
-            state=dict(row["state"]) if row["state"] else {},
-            version=row["version"],
-            created_at=row["created_at"],
-            updated_at=row["updated_at"]
-        )
-```
-
-#### 4.3.2 PgNotifyListener 实现
-
-创建 `src/cognizes/engine/pulse/pg_notify_listener.py`:
-
-```python
-"""
-PgNotifyListener: PostgreSQL LISTEN/NOTIFY 事件监听器
-
-实现实时事件流推送，替代 Redis Pub/Sub：
-- 监听 PostgreSQL NOTIFY 频道
-- 支持 WebSocket 推送
-- 验证端到端延迟 < 50ms
-"""
-
-from __future__ import annotations
-
-import asyncio
-import json
-import logging
-from dataclasses import dataclass
-from datetime import datetime
-from typing import Any, Callable, Coroutine
-
-import asyncpg
-
-logger = logging.getLogger(__name__)
-
-
-@dataclass
-class NotifyEvent:
-    """NOTIFY 事件数据"""
-    channel: str
-    payload: dict[str, Any]
-    received_at: datetime
-
-
-class PgNotifyListener:
-    """
-    PostgreSQL LISTEN/NOTIFY 监听器
-
-    特性：
-    - 异步事件监听
-    - 自动重连
-    - 回调处理
-    """
-
-    def __init__(
-        self,
-        dsn: str,
-        channels: list[str] | None = None
-    ):
-        self.dsn = dsn
-        self.channels = channels or ["event_stream"]
-        self._connection: asyncpg.Connection | None = None
-        self._listeners: dict[str, list[Callable]] = {}
-        self._running = False
-
-    async def start(self) -> None:
-        """启动监听器"""
-        self._running = True
-        self._connection = await asyncpg.connect(self.dsn)
-
-        for channel in self.channels:
-            await self._connection.add_listener(channel, self._handle_notification)
-            logger.info(f"Listening on channel: {channel}")
-
-    async def stop(self) -> None:
-        """停止监听器"""
-        self._running = False
-        if self._connection:
-            for channel in self.channels:
-                await self._connection.remove_listener(channel, self._handle_notification)
-            await self._connection.close()
-            self._connection = None
-
-    def on_event(
-        self,
-        channel: str,
-        callback: Callable[[NotifyEvent], Coroutine[Any, Any, None]]
-    ) -> None:
-        """注册事件回调"""
-        if channel not in self._listeners:
-            self._listeners[channel] = []
-        self._listeners[channel].append(callback)
-
-    def _handle_notification(
-        self,
-        connection: asyncpg.Connection,
-        pid: int,
-        channel: str,
-        payload: str
-    ) -> None:
-        """处理 NOTIFY 通知"""
-        received_at = datetime.now()
-
-        try:
-            data = json.loads(payload)
-        except json.JSONDecodeError:
-            data = {"raw": payload}
-
-        event = NotifyEvent(
-            channel=channel,
-            payload=data,
-            received_at=received_at
-        )
-
-        # 触发回调
-        callbacks = self._listeners.get(channel, [])
-        for callback in callbacks:
-            asyncio.create_task(callback(event))
-
-
-# ========================================
-# FastAPI WebSocket 集成示例
-# ========================================
-
-async def create_websocket_endpoint():
-    """
-    FastAPI WebSocket 端点示例
-
-    将 PostgreSQL NOTIFY 事件实时推送到前端
-    """
-    from fastapi import FastAPI, WebSocket
-
-    app = FastAPI()
-    listener = PgNotifyListener(dsn="postgresql://user:pass@localhost/agent_db")
-
-    @app.on_event("startup")
-    async def startup():
-        await listener.start()
-
-    @app.on_event("shutdown")
-    async def shutdown():
-        await listener.stop()
-
-    @app.websocket("/ws/events/{thread_id}")
-    async def websocket_endpoint(websocket: WebSocket, thread_id: str):
-        await websocket.accept()
-
-        queue: asyncio.Queue = asyncio.Queue()
-
-        async def on_event(event: NotifyEvent):
-            if event.payload.get("thread_id") == thread_id:
-                await queue.put(event)
-
-        listener.on_event("event_stream", on_event)
-
-        try:
-            while True:
-                event = await queue.get()
-                await websocket.send_json({
-                    "event_id": event.payload.get("event_id"),
-                    "author": event.payload.get("author"),
-                    "event_type": event.payload.get("event_type"),
-                    "timestamp": event.received_at.isoformat()
-                })
-        except Exception:
-            pass
-
-    return app
-```
+- **FastAPI Endpoint**: `src/cognizes/engine/api/main.py`
+- **Event Router**: 基于 `thread_id` 的订阅路由
+- **Protocol**: WebSocket (实时双向) / SSE (单向流)
 
 ---
 
-### 4.4 Step 4: 测试与验收
-
-#### 4.4.1 单元测试套件
-
-创建 `tests/pulse/test_state_manager.py`:
-
-```python
-"""
-StateManager 单元测试
-
-验证目标：
-1. Session CRUD 操作正确性
-2. 原子状态流转 (0 脏读/丢失)
-3. 乐观并发控制 (OCC)
-4. State 前缀解析
-"""
-
-import asyncio
-import uuid
-
-import asyncpg
-import pytest
-import pytest_asyncio
-
-from engine.pulse.state_manager import (
-    ConcurrencyConflictError,
-    Event,
-    StateManager,
-)
-
-
-@pytest_asyncio.fixture
-async def pool():
-    """创建测试数据库连接池"""
-    pool = await asyncpg.create_pool(
-        "postgresql://test:test@localhost/agent_test"
-    )
-    yield pool
-    await pool.close()
-
-
-@pytest_asyncio.fixture
-async def state_manager(pool):
-    """创建 StateManager 实例"""
-    return StateManager(pool)
-
-
-class TestSessionCRUD:
-    """Session CRUD 操作测试"""
-
-    @pytest.mark.asyncio
-    async def test_create_session(self, state_manager):
-        """测试创建会话"""
-        session = await state_manager.create_session(
-            app_name="test_app",
-            user_id="user_001",
-            initial_state={"language": "zh-CN"}
-        )
-
-        assert session.id is not None
-        assert session.app_name == "test_app"
-        assert session.user_id == "user_001"
-        assert session.state["language"] == "zh-CN"
-        assert session.version == 1
-
-    @pytest.mark.asyncio
-    async def test_get_session(self, state_manager):
-        """测试获取会话"""
-        created = await state_manager.create_session(
-            app_name="test_app",
-            user_id="user_002"
-        )
-
-        fetched = await state_manager.get_session(
-            app_name="test_app",
-            user_id="user_002",
-            session_id=created.id
-        )
-
-        assert fetched is not None
-        assert fetched.id == created.id
-
-    @pytest.mark.asyncio
-    async def test_delete_session(self, state_manager):
-        """测试删除会话"""
-        session = await state_manager.create_session(
-            app_name="test_app",
-            user_id="user_003"
-        )
-
-        result = await state_manager.delete_session(
-            app_name="test_app",
-            user_id="user_003",
-            session_id=session.id
-        )
-
-        assert result is True
-
-        fetched = await state_manager.get_session(
-            app_name="test_app",
-            user_id="user_003",
-            session_id=session.id
-        )
-        assert fetched is None
-
-
-class TestAtomicStateTransitions:
-    """原子状态流转测试"""
-
-    @pytest.mark.asyncio
-    async def test_append_event_with_state_delta(self, state_manager):
-        """测试事件追加与状态更新的原子性"""
-        session = await state_manager.create_session(
-            app_name="test_app",
-            user_id="user_004",
-            initial_state={"counter": 0}
-        )
-
-        event = Event(
-            id="",
-            thread_id=session.id,
-            invocation_id=str(uuid.uuid4()),
-            author="agent",
-            event_type="state_update",
-            content={"text": "Incrementing counter"},
-            actions={"state_delta": {"counter": 1}}
-        )
-
-        await state_manager.append_event(session, event)
-
-        # 验证状态已更新
-        assert session.state["counter"] == 1
-        assert session.version == 2
-
-    @pytest.mark.asyncio
-    async def test_zero_dirty_reads(self, state_manager):
-        """测试 0 脏读 - 并发写入测试"""
-        session = await state_manager.create_session(
-            app_name="test_app",
-            user_id="user_005",
-            initial_state={"counter": 0}
-        )
-
-        async def increment():
-            for _ in range(10):
-                try:
-                    await state_manager.update_session_state(
-                        session,
-                        {"counter": session.state.get("counter", 0) + 1}
-                    )
-                except ConcurrencyConflictError:
-                    pass
-
-        # 并发执行 5 个任务
-        await asyncio.gather(*[increment() for _ in range(5)])
-
-        # 重新获取最新状态
-        final = await state_manager.get_session(
-            session.app_name, session.user_id, session.id
-        )
-
-        # 验证无数据丢失
-        assert final.state["counter"] > 0
-
-
-class TestOptimisticConcurrencyControl:
-    """乐观并发控制测试"""
-
-    @pytest.mark.asyncio
-    async def test_version_conflict_detection(self, state_manager):
-        """测试版本冲突检测"""
-        session = await state_manager.create_session(
-            app_name="test_app",
-            user_id="user_006"
-        )
-
-        # 模拟另一个进程先更新了状态
-        async with state_manager.pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE threads SET version = version + 1 WHERE id = $1",
-                uuid.UUID(session.id)
-            )
-
-        # 此时 session.version 已过期，应该抛出冲突
-        event = Event(
-            id="",
-            thread_id=session.id,
-            invocation_id=str(uuid.uuid4()),
-            author="agent",
-            event_type="state_update",
-            actions={"state_delta": {"key": "value"}}
-        )
-
-        with pytest.raises(ConcurrencyConflictError):
-            await state_manager.append_event(session, event)
-
-
-class TestStatePrefixes:
-    """State 前缀解析测试"""
-
-    def test_parse_session_scope(self, state_manager):
-        """测试无前缀 = Session Scope"""
-        prefix, key = state_manager.parse_state_prefix("task_progress")
-        assert prefix == "session"
-        assert key == "task_progress"
-
-    def test_parse_user_scope(self, state_manager):
-        """测试 user: 前缀"""
-        prefix, key = state_manager.parse_state_prefix("user:preferred_language")
-        assert prefix == "user"
-        assert key == "preferred_language"
-
-    def test_parse_app_scope(self, state_manager):
-        """测试 app: 前缀"""
-        prefix, key = state_manager.parse_state_prefix("app:max_retries")
-        assert prefix == "app"
-        assert key == "max_retries"
-
-    def test_parse_temp_scope(self, state_manager):
-        """测试 temp: 前缀"""
-        prefix, key = state_manager.parse_state_prefix("temp:intermediate_result")
-        assert prefix == "temp"
-        assert key == "intermediate_result"
-
-
-class TestTransactionRollback:
-    """事务回滚测试 (对标 P1-3-4)"""
-
-    @pytest.mark.asyncio
-    async def test_rollback_on_error(self, state_manager):
-        """测试异常时事务回滚，状态不变"""
-        session = await state_manager.create_session(
-            app_name="test_app",
-            user_id="user_rollback",
-            initial_state={"value": "original"}
-        )
-        original_version = session.version
-
-        # 模拟一个会失败的事件（例如无效的 JSON）
-        try:
-            event = Event(
-                id="",
-                thread_id=session.id,
-                invocation_id=str(uuid.uuid4()),
-                author="agent",
-                event_type="state_update",
-                actions={"state_delta": {"value": "modified"}}
-            )
-            # 人为制造冲突
-            async with state_manager.pool.acquire() as conn:
-                await conn.execute(
-                    "UPDATE threads SET version = version + 100 WHERE id = $1",
-                    uuid.UUID(session.id)
-                )
-            await state_manager.append_event(session, event)
-        except ConcurrencyConflictError:
-            pass
-
-        # 验证原始状态未被修改
-        fetched = await state_manager.get_session(
-            session.app_name, session.user_id, session.id
-        )
-        # 注意：version 被外部修改了，但 state 应该保持原值
-        assert fetched.state["value"] == "original"
-
-
-class TestMultiAgentConcurrency:
-    """多 Agent 竞争写测试 (对标 P1-3-11)"""
-
-    @pytest.mark.asyncio
-    async def test_10_concurrent_writes_no_data_loss(self, state_manager):
-        """10 并发写入，0 数据丢失"""
-        session = await state_manager.create_session(
-            app_name="test_app",
-            user_id="user_concurrent",
-            initial_state={"writes": []}
-        )
-
-        successful_writes = []
-
-        async def agent_write(agent_id: int):
-            """模拟单个 Agent 的写入"""
-            for i in range(5):
-                try:
-                    # 每次都重新获取最新 session
-                    current = await state_manager.get_session(
-                        session.app_name, session.user_id, session.id
-                    )
-                    current_writes = current.state.get("writes", [])
-                    new_writes = current_writes + [f"agent_{agent_id}_write_{i}"]
-
-                    await state_manager.update_session_state(
-                        current,
-                        {"writes": new_writes}
-                    )
-                    successful_writes.append(f"agent_{agent_id}_write_{i}")
-                except ConcurrencyConflictError:
-                    # 冲突重试
-                    await asyncio.sleep(0.01)
-
-        # 10 个并发 Agent
-        await asyncio.gather(*[agent_write(i) for i in range(10)])
-
-        # 验证最终状态
-        final = await state_manager.get_session(
-            session.app_name, session.user_id, session.id
-        )
-
-        # 所有成功的写入都应该在最终状态中
-        assert len(final.state["writes"]) > 0
-        print(f"Total successful writes: {len(final.state['writes'])}")
-
-
-class TestHighQPSPerformance:
-    """高 QPS 性能测试 (对标 P1-3-12)"""
-
-    @pytest.mark.asyncio
-    async def test_100_qps_session_creation(self, state_manager):
-        """100 QPS Session 创建测试"""
-        import time
-
-        start_time = time.perf_counter()
-        sessions = []
-
-        # 创建 100 个 Session
-        for i in range(100):
-            session = await state_manager.create_session(
-                app_name="perf_test",
-                user_id=f"user_{i}"
-            )
-            sessions.append(session)
-
-        elapsed = time.perf_counter() - start_time
-        qps = 100 / elapsed
-
-        print(f"Session creation: {qps:.2f} QPS ({elapsed:.3f}s for 100 sessions)")
-
-        # 清理
-        for session in sessions:
-            await state_manager.delete_session(
-                session.app_name, session.user_id, session.id
-            )
-
-        assert qps > 100, f"QPS {qps} is below target 100"
-```
-
-执行测试：
-
-````bash
-uv run pytest tests/pulse/test_state_manager.py -v
-```
-
-#### 4.4.2 端到端延迟测试
-
-创建 `tests/pulse/test_notify_latency.py`:
-
-```python
-"""
-NOTIFY 延迟测试
-
-验证目标：
-- 端到端延迟 < 50ms
-- 100 msg/s 压力测试
-"""
-
-import asyncio
-import time
-import uuid
-
-import asyncpg
-import pytest
-import pytest_asyncio
-
-
-@pytest_asyncio.fixture
-async def conn():
-    """创建测试连接"""
-    conn = await asyncpg.connect(
-        "postgresql://test:test@localhost/agent_test"
-    )
-    yield conn
-    await conn.close()
-
-
-class TestNotifyLatency:
-    """NOTIFY 延迟测试"""
-
-    @pytest.mark.asyncio
-    async def test_end_to_end_latency(self, conn):
-        """测试端到端延迟 < 50ms"""
-        latencies = []
-        received = asyncio.Event()
-        send_time = 0
-
-        def on_notify(connection, pid, channel, payload):
-            nonlocal send_time
-            receive_time = time.perf_counter()
-            latency_ms = (receive_time - send_time) * 1000
-            latencies.append(latency_ms)
-            received.set()
-
-        await conn.add_listener("test_latency", on_notify)
-
-        # 发送 100 条消息
-        for i in range(100):
-            send_time = time.perf_counter()
-            await conn.execute(
-                f"NOTIFY test_latency, '{i}'"
-            )
-            await asyncio.wait_for(received.wait(), timeout=1.0)
-            received.clear()
-
-        await conn.remove_listener("test_latency", on_notify)
-
-        # 验证延迟
-        avg_latency = sum(latencies) / len(latencies)
-        p99_latency = sorted(latencies)[int(len(latencies) * 0.99)]
-
-        print(f"Avg latency: {avg_latency:.2f}ms")
-        print(f"P99 latency: {p99_latency:.2f}ms")
-
-        assert avg_latency < 50, f"Avg latency {avg_latency}ms exceeds 50ms"
-        assert p99_latency < 50, f"P99 latency {p99_latency}ms exceeds 50ms"
-
-    @pytest.mark.asyncio
-    async def test_100_msg_per_second_throughput(self, conn):
-        """测试 100 msg/s 吞吐量 (对标 P1-3-17)"""
-        received_count = 0
-        lost_count = 0
-        total_messages = 100
-
-        received_messages = set()
-
-        def on_notify(connection, pid, channel, payload):
-            nonlocal received_count
-            received_count += 1
-            received_messages.add(payload)
-
-        await conn.add_listener("throughput_test", on_notify)
-
-        start_time = time.perf_counter()
-
-        # 以 100 msg/s 的速率发送
-        for i in range(total_messages):
-            await conn.execute(f"NOTIFY throughput_test, 'msg_{i}'")
-            await asyncio.sleep(0.01)  # 10ms 间隔 = 100 msg/s
-
-        # 等待所有消息到达
-        await asyncio.sleep(0.5)
-
-        elapsed = time.perf_counter() - start_time
-
-        await conn.remove_listener("throughput_test", on_notify)
-
-        # 计算丢失率
-        lost_count = total_messages - len(received_messages)
-        loss_rate = (lost_count / total_messages) * 100
-        throughput = len(received_messages) / elapsed
-
-        print(f"Throughput: {throughput:.2f} msg/s")
-        print(f"Received: {len(received_messages)}/{total_messages}")
-        print(f"Loss rate: {loss_rate:.2f}%")
-
-        assert lost_count == 0, f"Lost {lost_count} messages"
-        assert throughput >= 90, f"Throughput {throughput} is below 90 msg/s"
-````
-
-执行测试：
+### 4.4 Step 4: The Meridian System - AG-UI 事件桥接
+
+> [!TIP]
+>
+> **Metaphor: 构建经络系统 (Building the Meridian System)**
+>
+> 如果把 Pulse Engine 比作心脏，EventBridge 则是遍布全身的经络——它把每一次心跳（DB 事件）转化为脉络中的血液流动（AG‑UI 协议），从而驱动可视化界面的即时响应。
+
+**核心目标**：实现 PostgreSQL 事件流与 AG-UI 协议的无缝转换。
+
+#### 4.4.1 The Translator: EventBridge 核心实现
+
+**核心职责**：
+
+- **Protocol Translation**: 将 PG `NOTIFY` Payload 转换为 AG-UI 标准事件格式
+- **Event Routing**: 根据 `event_type` 路由到不同的 UI 组件
+- **Type Safety**: 6 种核心事件类型的强类型定义
+
+**事件映射矩阵**：
+
+| PG Event Source             | AG-UI Event Type       | Trigger Condition |
+| :-------------------------- | :--------------------- | :---------------- |
+| `events` (role=user/agent)  | `TEXT_MESSAGE_START`   | 新消息创建        |
+| `events` (content delta)    | `TEXT_MESSAGE_CONTENT` | 流式内容追加      |
+| `runs` (INSERT)             | `RUN_STARTED`          | 执行链路启动      |
+| `runs` (UPDATE complete)    | `RUN_FINISHED`         | 执行完成          |
+| `threads.state` (via event) | `STATE_DELTA`          | 状态变更          |
+| `events` (tool_call)        | `TOOL_CALL_START`      | 工具调用          |
+
+**实现参考**：[`src/cognizes/engine/pulse/event_bridge.py`](../../src/cognizes/engine/pulse/event_bridge.py)
+
+#### 4.4.2 The Monitor: 状态调试面板
+
+**核心职责**：
+
+- **State Inspection**: 按前缀分组展示状态 (`user:`, `app:`, session)
+- **History Tracking**: 状态变更历史追溯
+- **Debug API**: RESTful 接口供开发工具调用
+
+**实现参考**：[`src/cognizes/engine/pulse/state_debug.py`](../../src/cognizes/engine/pulse/state_debug.py)
+
+#### 4.4.3 The Channel: SSE 事件流端点
+
+**核心目标**：为前端提供持久化的单向事件流通道。
+
+**关键特性**：
+
+- **Protocol**: Server-Sent Events (HTTP Long-Polling)
+- **Endpoint**: `/api/runs/{run_id}/events`
+- **Latency**: Target < 100ms (端到端)
+
+**实现参考**：[`src/cognizes/engine/api/main.py`](../../src/cognizes/engine/api/main.py)
+
+**验收标准**：
+
+- ✓ 6 种事件类型正确映射
+- ✓ SSE 流延迟 < 100ms
+- ✓ 状态调试 API 完整可用
+- ✓ 单元测试覆盖率 > 80%
+
+---
+
+### 4.5 Step 5: 测试
+
+#### 4.5.1 单元测试套件
+
+- **目标**：验证 `StateManager` 的核心业务逻辑与状态转换的正确性。
+- **位置**：[`tests/unittests/pulse/test_state_manager.py`](../../tests/unittests/pulse/test_state_manager.py)
+- **运行方式**：
 
 ```bash
-uv run pytest tests/pulse/test_notify_latency.py -v -s
+uv run pytest tests/unittests/pulse/test_state_manager.py -v
 ```
 
----
-
-### 4.5 Step 5: AG-UI 事件桥接层
-
-> [!NOTE]
->
-> **对标 AG-UI 协议**：本节实现 The Pulse 与 AG-UI 可视化层的事件桥接，确保所有会话状态变更、事件流都能实时推送到前端进行可视化展示。
->
-> **参考资源**：
->
-> - [AG-UI 协议调研](../research/070-ag-ui.md)
-> - [AG-UI 官方文档](https://docs.ag-ui.com/)
-
-#### 4.5.1 事件桥接架构
-
-```mermaid
-graph TB
-    subgraph "The Pulse 存储层"
-        TH[threads 表]
-        EV[events 表]
-        RN[runs 表]
-    end
-
-    subgraph "事件桥接层"
-        PNL[PgNotifyListener]
-        EB[EventBridge]
-        SER[SSE/WebSocket 端点]
-    end
-
-    subgraph "AG-UI 前端"
-        CK[CopilotKit]
-        UI[可视化面板]
-    end
-
-    EV -->|NOTIFY| PNL
-    TH -->|状态变更| PNL
-    PNL --> EB
-    EB -->|AG-UI Events| SER
-    SER -->|Event Stream| CK
-    CK --> UI
-
-    style EB fill:#4ade80,stroke:#16a34a,color:#000
-```
-
-#### 4.5.2 AG-UI 事件映射表
-
-| Pulse 事件源              | 触发条件     | AG-UI 事件类型         | 事件数据              |
-| :------------------------ | :----------- | :--------------------- | :-------------------- |
-| `runs` INSERT             | 新建执行链路 | `RUN_STARTED`          | `{run_id, thread_id}` |
-| `runs` UPDATE (complete)  | 执行完成     | `RUN_FINISHED`         | `{run_id, status}`    |
-| `events` INSERT (message) | 新消息创建   | `TEXT_MESSAGE_START`   | `{message_id}`        |
-| `events` INSERT (content) | 消息内容追加 | `TEXT_MESSAGE_CONTENT` | `{delta}`             |
-| `threads.state` UPDATE    | 状态变更     | `STATE_DELTA`          | `{json_patch}`        |
-| `events` INSERT (tool)    | 工具调用     | `TOOL_CALL_START`      | `{tool_name, args}`   |
-
-#### 4.5.3 EventBridge 实现
-
-创建 `src/cognizes/engine/pulse/event_bridge.py`：
-
-```python
-"""
-Pulse EventBridge: 将 PostgreSQL 事件转换为 AG-UI 标准事件
-
-职责:
-1. 监听 PostgreSQL NOTIFY 事件
-2. 转换为 AG-UI 标准事件格式
-3. 通过 SSE/WebSocket 推送到前端
-"""
-
-from __future__ import annotations
-
-import json
-import asyncio
-from dataclasses import dataclass, field
-from enum import Enum
-from typing import Any, Callable, AsyncGenerator
-from datetime import datetime
-
-
-class AgUiEventType(str, Enum):
-    """AG-UI 标准事件类型"""
-    RUN_STARTED = "RUN_STARTED"
-    RUN_FINISHED = "RUN_FINISHED"
-    RUN_ERROR = "RUN_ERROR"
-    STEP_STARTED = "STEP_STARTED"
-    STEP_FINISHED = "STEP_FINISHED"
-    TEXT_MESSAGE_START = "TEXT_MESSAGE_START"
-    TEXT_MESSAGE_CONTENT = "TEXT_MESSAGE_CONTENT"
-    TEXT_MESSAGE_END = "TEXT_MESSAGE_END"
-    TOOL_CALL_START = "TOOL_CALL_START"
-    TOOL_CALL_ARGS = "TOOL_CALL_ARGS"
-    TOOL_CALL_END = "TOOL_CALL_END"
-    STATE_SNAPSHOT = "STATE_SNAPSHOT"
-    STATE_DELTA = "STATE_DELTA"
-    MESSAGES_SNAPSHOT = "MESSAGES_SNAPSHOT"
-    RAW = "RAW"
-    CUSTOM = "CUSTOM"
-
-
-@dataclass
-class AgUiEvent:
-    """AG-UI 标准事件"""
-    type: AgUiEventType
-    run_id: str
-    timestamp: float = field(default_factory=lambda: datetime.now().timestamp())
-    data: dict = field(default_factory=dict)
-
-    def to_sse(self) -> str:
-        """转换为 SSE 格式"""
-        payload = {
-            "type": self.type.value,
-            "runId": self.run_id,
-            "timestamp": self.timestamp,
-            **self.data
-        }
-        return f"data: {json.dumps(payload)}\n\n"
-
-
-class PulseEventBridge:
-    """
-    Pulse 事件桥接器
-
-    将 PostgreSQL 事件转换为 AG-UI 标准事件
-    """
-
-    def __init__(self, pg_listener):
-        """
-        Args:
-            pg_listener: PgNotifyListener 实例
-        """
-        self._pg_listener = pg_listener
-        self._subscribers: dict[str, list[asyncio.Queue]] = {}  # run_id -> queues
-        self._running = False
-
-    async def start(self) -> None:
-        """启动事件桥接"""
-        self._running = True
-
-        # 注册 PostgreSQL 监听器回调
-        await self._pg_listener.subscribe(
-            channel="event_stream",
-            callback=self._handle_pg_event
-        )
-
-    async def stop(self) -> None:
-        """停止事件桥接"""
-        self._running = False
-        await self._pg_listener.unsubscribe("event_stream")
-
-    async def subscribe(self, run_id: str) -> AsyncGenerator[AgUiEvent, None]:
-        """
-        订阅指定 run_id 的事件流
-
-        Yields:
-            AgUiEvent: AG-UI 标准事件
-        """
-        queue: asyncio.Queue = asyncio.Queue()
-
-        if run_id not in self._subscribers:
-            self._subscribers[run_id] = []
-        self._subscribers[run_id].append(queue)
-
-        try:
-            while self._running:
-                try:
-                    event = await asyncio.wait_for(queue.get(), timeout=30.0)
-                    yield event
-
-                    # 如果是完成事件，结束订阅
-                    if event.type in (AgUiEventType.RUN_FINISHED, AgUiEventType.RUN_ERROR):
-                        break
-                except asyncio.TimeoutError:
-                    # 发送心跳
-                    yield AgUiEvent(
-                        type=AgUiEventType.CUSTOM,
-                        run_id=run_id,
-                        data={"name": "heartbeat"}
-                    )
-        finally:
-            self._subscribers[run_id].remove(queue)
-            if not self._subscribers[run_id]:
-                del self._subscribers[run_id]
-
-    async def _handle_pg_event(self, channel: str, payload: str) -> None:
-        """处理 PostgreSQL 事件并转换为 AG-UI 事件"""
-        try:
-            data = json.loads(payload)
-            event = self._convert_to_agui_event(data)
-
-            if event and event.run_id in self._subscribers:
-                for queue in self._subscribers[event.run_id]:
-                    await queue.put(event)
-        except json.JSONDecodeError:
-            pass
-
-    def _convert_to_agui_event(self, pg_data: dict) -> AgUiEvent | None:
-        """
-        将 PostgreSQL 事件数据转换为 AG-UI 事件
-
-        Args:
-            pg_data: PostgreSQL NOTIFY 载荷
-
-        Returns:
-            AG-UI 事件或 None
-        """
-        table = pg_data.get("table")
-        operation = pg_data.get("operation")
-        row_data = pg_data.get("data", {})
-
-        run_id = row_data.get("run_id") or row_data.get("id")
-        if not run_id:
-            return None
-
-        # 根据表和操作类型映射事件
-        if table == "runs":
-            if operation == "INSERT":
-                return AgUiEvent(
-                    type=AgUiEventType.RUN_STARTED,
-                    run_id=run_id,
-                    data={"threadId": row_data.get("thread_id")}
-                )
-            elif operation == "UPDATE":
-                status = row_data.get("status")
-                if status == "completed":
-                    return AgUiEvent(
-                        type=AgUiEventType.RUN_FINISHED,
-                        run_id=run_id,
-                        data={"status": status}
-                    )
-                elif status == "failed":
-                    return AgUiEvent(
-                        type=AgUiEventType.RUN_ERROR,
-                        run_id=run_id,
-                        data={"error": row_data.get("error")}
-                    )
-
-        elif table == "events":
-            event_type = row_data.get("event_type")
-            if event_type == "message":
-                return AgUiEvent(
-                    type=AgUiEventType.TEXT_MESSAGE_CONTENT,
-                    run_id=run_id,
-                    data={
-                        "messageId": row_data.get("id"),
-                        "delta": row_data.get("content", {}).get("text", "")
-                    }
-                )
-            elif event_type == "tool_call":
-                return AgUiEvent(
-                    type=AgUiEventType.TOOL_CALL_START,
-                    run_id=run_id,
-                    data={
-                        "toolCallId": row_data.get("id"),
-                        "toolCallName": row_data.get("content", {}).get("tool_name")
-                    }
-                )
-
-        elif table == "threads":
-            if operation == "UPDATE" and "state" in row_data:
-                return AgUiEvent(
-                    type=AgUiEventType.STATE_DELTA,
-                    run_id=run_id,
-                    data={"delta": row_data.get("state_delta", [])}
-                )
-
-        return None
-
-
-# FastAPI 端点示例
-async def create_sse_endpoint(bridge: PulseEventBridge, run_id: str):
-    """
-    创建 SSE 事件流端点
-
-    Usage:
-        @app.get("/api/runs/{run_id}/events")
-        async def stream_events(run_id: str):
-            return StreamingResponse(
-                create_sse_endpoint(bridge, run_id),
-                media_type="text/event-stream"
-            )
-    """
-    async for event in bridge.subscribe(run_id):
-        yield event.to_sse()
-```
-
-#### 4.5.4 状态调试面板数据接口
-
-创建 `src/cognizes/engine/pulse/state_debug.py`：
-
-```python
-"""状态调试面板数据接口"""
-
-from dataclasses import dataclass
-from typing import Any
-import json
-
-
-@dataclass
-class StateDebugInfo:
-    """状态调试信息"""
-    thread_id: str
-    current_state: dict[str, Any]
-    state_history: list[dict]  # 最近 N 次状态变更
-    prefix_breakdown: dict[str, dict]  # 按前缀分组的状态
-
-
-class StateDebugService:
-    """状态调试服务"""
-
-    def __init__(self, pool):
-        self._pool = pool
-
-    async def get_debug_info(self, thread_id: str) -> StateDebugInfo:
-        """获取线程的调试信息"""
-        async with self._pool.acquire() as conn:
-            # 获取当前状态
-            thread = await conn.fetchrow(
-                "SELECT state FROM threads WHERE id = $1",
-                thread_id
-            )
-
-            # 获取状态变更历史
-            history = await conn.fetch("""
-                SELECT
-                    created_at,
-                    content->'state_delta' as delta
-                FROM events
-                WHERE thread_id = $1
-                  AND content ? 'state_delta'
-                ORDER BY created_at DESC
-                LIMIT 20
-            """, thread_id)
-
-            current_state = json.loads(thread["state"]) if thread else {}
-
-            # 按前缀分组
-            prefix_breakdown = {
-                "session": {},
-                "user": {},
-                "app": {},
-                "temp": {}
-            }
-
-            for key, value in current_state.items():
-                if key.startswith("user:"):
-                    prefix_breakdown["user"][key[5:]] = value
-                elif key.startswith("app:"):
-                    prefix_breakdown["app"][key[4:]] = value
-                elif key.startswith("temp:"):
-                    prefix_breakdown["temp"][key[5:]] = value
-                else:
-                    prefix_breakdown["session"][key] = value
-
-            return StateDebugInfo(
-                thread_id=thread_id,
-                current_state=current_state,
-                state_history=[
-                    {"time": str(h["created_at"]), "delta": json.loads(h["delta"])}
-                    for h in history
-                ],
-                prefix_breakdown=prefix_breakdown
-            )
-```
-
-#### 4.5.5 任务清单
-
-| 任务 ID | 任务描述                   | 状态      | 验收标准                |
-| :------ | :------------------------- | :-------- | :---------------------- |
-| P1-5-1  | 实现 `PulseEventBridge` 类 | 🔲 待开始 | PostgreSQL 事件正确转换 |
-| P1-5-2  | 实现 AG-UI 事件映射逻辑    | 🔲 待开始 | 6 种事件类型覆盖        |
-| P1-5-3  | 实现 SSE 端点              | 🔲 待开始 | 事件流延迟 < 100ms      |
-| P1-5-4  | 实现 StateDebugService     | 🔲 待开始 | 调试信息完整            |
-| P1-5-5  | 编写事件桥接单元测试       | 🔲 待开始 | 覆盖率 > 80%            |
-
-#### 4.5.6 验收标准
-
-| 验收项   | 验收标准                                 | 验证方法 |
-| :------- | :--------------------------------------- | :------- |
-| 事件转换 | PostgreSQL 6 类事件正确映射到 AG-UI 事件 | 单元测试 |
-| 延迟     | 事件从 DB 到前端延迟 < 100ms (P99)       | 性能测试 |
-| 可靠性   | 事件不丢失，顺序正确                     | 压力测试 |
-| 调试面板 | 状态分组正确，历史可追溯                 | 集成测试 |
-
----
-
-## 5. 验收标准
-
-### 5.1 功能验收矩阵
-
-> [!NOTE]
->
-> 以下验收项与 [001-task-checklist.md](./001-task-checklist.md) 中的任务 ID 对应，确保每项需求都有验证。
-
-| 验收项              | 任务 ID    | 验收标准                            | 验证方法      |
-| :------------------ | :--------- | :---------------------------------- | :------------ |
-| PostgreSQL 16+ 部署 | P1-1-1     | `SELECT version()` 返回 16.x+       | 命令行验证    |
-| pgvector 安装       | P1-1-2     | `CREATE EXTENSION vector` 成功      | SQL 执行      |
-| pg_cron 安装        | P1-1-3     | `SELECT * FROM cron.job` 可执行     | SQL 执行      |
-| 连接池配置          | P1-1-5     | 支持 100+ 并发连接                  | 压力测试      |
-| Schema 部署         | P1-2-12    | 7 张表 + 2 个触发器创建成功         | `\dt` + `\df` |
-| Session CRUD        | P1-3-1~5   | 创建/读取/列表/删除操作正确         | 单元测试      |
-| 原子状态流转        | P1-3-6~7   | 0 脏读/丢失                         | 并发测试      |
-| 乐观锁 (OCC)        | P1-3-8~12  | 版本冲突正确检测 + 10 并发 0 丢失   | 冲突测试      |
-| 实时事件流          | P1-3-13~17 | 端到端延迟 < 50ms, 100 msg/s 无丢失 | 延迟/压力测试 |
-
-### 5.2 性能基准
-
-| 指标             | 目标值    | 测试条件       | 对应任务 |
-| :--------------- | :-------- | :------------- | :------- |
-| Session 创建 QPS | > 1000    | 单节点         | P1-3-12  |
-| Event 追加 QPS   | > 500     | 含 state_delta | P1-3-12  |
-| NOTIFY 延迟 P99  | < 50ms    | 100 msg/s      | P1-3-16  |
-| 并发写入成功率   | 100%      | 10 并发        | P1-3-11  |
-| 消息吞吐量       | 100 msg/s | 稳定无丢失     | P1-3-17  |
-
-### 5.3 验收检查清单
-
-```markdown
-## Phase 1 验收检查清单
-
-### 环境部署
-
-- [ ] PostgreSQL 16+ 安装并运行
-- [ ] pgvector 扩展安装成功
-- [ ] pg_cron 扩展安装成功 (可选)
-- [ ] 连接池配置完成
-
-### Schema 设计
-
-- [ ] threads 表创建成功
-- [ ] events 表创建成功
-- [ ] runs 表创建成功
-- [ ] messages 表创建成功
-- [ ] snapshots 表创建成功
-- [ ] user_states 表创建成功
-- [ ] app_states 表创建成功
-- [ ] NOTIFY 触发器创建成功
-- [ ] updated_at 触发器创建成功
-
-### 功能验证
-
-- [ ] Session CRUD 测试通过
-- [ ] 原子状态流转测试通过
-- [ ] 乐观锁冲突检测测试通过
-- [ ] 事务回滚测试通过
-- [ ] 多 Agent 并发写测试通过
-
-### 性能验证
-
-- [ ] Session 创建 QPS > 1000
-- [ ] NOTIFY 延迟 P99 < 50ms
-- [ ] 100 msg/s 压力测试通过
-```
-
----
-
-## 6. 交付物清单
-
-| 类别         | 文件路径                                           | 描述                           | 对应任务   |
-| :----------- | :------------------------------------------------- | :----------------------------- | :--------- |
-| **文档**     | `docs/010-the-pulse.md`                            | 本实施方案                     | P1-4-1     |
-| **Schema**   | `src/cognizes/engine/schema/agent_schema.sql`      | 统一建表脚本 (7 表 + 2 触发器) | P1-2-12    |
-| **代码**     | `src/cognizes/engine/pulse/state_manager.py`       | StateManager 实现              | P1-4-2     |
-|              | `src/cognizes/engine/pulse/pg_notify_listener.py`  | NOTIFY 监听器                  | P1-3-14    |
-|              | `src/cognizes/engine/pulse/event_bridge.py`        | 事件桥接器                     | P1-5-1     |
-|              | `src/cognizes/engine/pulse/state_debug.py`         | 状态调试服务                   | P1-5-4     |
-| **单元测试** | `tests/unittests/pulse/test_state_manager.py`      | 前缀解析、dataclass 纯逻辑     | P1-4-3     |
-|              | `tests/unittests/pulse/test_pg_notify_listener.py` | 回调注册、JSON 解析逻辑        | P1-3-15    |
-|              | `tests/unittests/pulse/test_event_bridge.py`       | SSE 格式、事件类型映射         | P1-5-2     |
-|              | `tests/unittests/pulse/test_state_debug.py`        | 前缀分组逻辑                   | P1-5-5     |
-| **集成测试** | `tests/integration/pulse/test_state_manager_db.py` | 数据库 CRUD、OCC、高并发       | P1-4-4     |
-|              | `tests/integration/pulse/test_notify_latency.py`   | NOTIFY 延迟 & 吞吐量           | P1-3-16~17 |
-|              | `tests/integration/pulse/test_event_bridge_e2e.py` | 端到端事件流测试               | P1-5-3     |
-|              | `tests/integration/pulse/test_state_debug_db.py`   | 状态历史查询测试               | P1-5-6     |
-
----
-
-## 7. Phase 1 验证 SOP
-
-### 7.1 环境验证
+#### 4.5.2 端到端延迟测试
+
+- **目标**：评估 `EventBridge` 从 PostgreSQL `NOTIFY` 到前端 UI 事件的端到端时延，确保 <100 ms。
+- **位置**：[`tests/integration/pulse/test_notify_latency.py`](../../tests/integration/pulse/test_notify_latency.py)
+- **运行方式**：
 
 ```bash
-# PostgreSQL 版本验证
+uv run pytest tests/integration/pulse/test_notify_latency.py -v -s
+```
+
+#### 统一执行
+
+如需一次性运行全部 Pulse 相关测试：
+
+```bash
+uv run pytest tests/unittests/pulse tests/integration/pulse -v
+```
+
+## 5. 验证 SOP (Phase 1：生命体征监测)
+
+> [!IMPORTANT]
+>
+> 本节提供 Phase 1: The Pulse 完整验收流程，请按顺序逐步执行。
+
+Phase 1 验证是一次完整的外科体检。我们需要依次确认环境无菌 (Environment)、器官功能正常 (Organ Function)、血液循环畅通 (Systemic Circulation) 以及心脏抗压能力 (Cardiac Stress)。
+
+### 5.1 Step 1: 环境检查 (Clinical Environment Check)
+
+> **Objective**: 确保手术室（运行环境）的各项指标符合生命维持标准。
+
+**检查清单**:
+
+1. **数据库 (The Soil)**: 确保统一存储基座 (`cognizes-engine`) 就绪。
+2. **扩展 (The Nutrients)**: 确保 `vector` (记忆) 与 `pg_cron` (心跳) 能力加载。
+3. **连接 (The Vessel)**: 确保 Python 到 PostgreSQL 的 `asyncpg` 通路顺畅。
+
+```bash
+# 1. 基础环境 (PG Version > 16)
 psql -d 'cognizes-engine' -c "SELECT version();"
 
-# 扩展状态检查
+# 2. 核心机能 (Extensions Check)
 psql -d 'cognizes-engine' -c "SELECT * FROM pg_available_extensions WHERE name IN ('vector', 'pg_cron');"
 
-# 数据库连接测试
+# 3. 血管通路 (Connection Check)
 psql -d cognizes-engine -c "\dt"
 
-# Python 环境验证
+# 4. 脉搏接口 (Python Import)
 uv run python -c "from cognizes.engine.pulse.state_manager import StateManager; print('✓ Import OK')"
 ```
 
-### 7.2 单元测试验证
+#### 5.1.1 激活心脏起搏器 (Service Startup)
+
+启动 API 服务，激活整个系统的脉搏监听器 (`PgNotifyListener`)。
 
 ```bash
-# 全部单元测试 (44 个测试用例，无数据库依赖)
-uv run pytest tests/unittests/pulse/ -v
-
-# 快速回归 (仅核心逻辑)
-uv run pytest tests/unittests/pulse/test_state_manager.py -v --tb=short
-```
-
-### 7.3 集成测试验证
-
-```bash
-# StateManager 数据库集成测试
-uv run pytest tests/integration/pulse/test_state_manager_db.py -v
-
-# NOTIFY 延迟测试 (验证 < 50ms)
-uv run pytest tests/integration/pulse/test_notify_latency.py -v -s
-
-# EventBridge 端到端测试
-uv run pytest tests/integration/pulse/test_event_bridge_e2e.py -v
-
-# StateDebug 数据库测试
-uv run pytest tests/integration/pulse/test_state_debug_db.py -v
-
-# 全部集成测试
-uv run pytest tests/integration/ -v
-```
-
-### 7.4 性能指标验收
-
-| 指标         | 目标值 | 验证测试                                 | 验证命令                                                                                                                    |
-| :----------- | :----- | :--------------------------------------- | :-------------------------------------------------------------------------------------------------------------------------- |
-| NOTIFY 延迟  | < 50ms | `test_end_to_end_latency`                | `uv run pytest tests/integration/pulse/test_notify_latency.py::TestNotifyLatency::test_end_to_end_latency -v -s`            |
-| 吞吐量丢失率 | 0%     | `test_100_msg_per_second_throughput`     | `uv run pytest tests/integration/pulse/test_notify_latency.py::TestNotifyLatency::test_100_msg_per_second_throughput -v -s` |
-| OCC QPS      | > 100  | `test_100_qps_session_creation`          | `uv run pytest tests/unittests/pulse/test_state_manager.py::TestHighQPSPerformance -v -s`                                   |
-| 并发写入     | 0 丢失 | `test_10_concurrent_writes_no_data_loss` | `uv run pytest tests/unittests/pulse/test_state_manager.py::TestMultiAgentConcurrency -v -s`                                |
-
----
-
-## 8. 遗留任务指引
-
-> [!NOTE]
->
-> 以下任务需在 Phase 1 验收前完成。
-
-### 8.1 P1-1-8：配置 GOOGLE_API_KEY
-
-**目的**：为 Google ADK 提供 API 认证。
-
-```bash
-# 方式 1：环境变量 (推荐)
-export GOOGLE_API_KEY="your-api-key-here"
-
-# 方式 2：.env 文件
-echo 'GOOGLE_API_KEY=your-api-key-here' >> .env
-
-# 验证
-uv run python -c "import os; print('✓ API Key:', os.getenv('GOOGLE_API_KEY', 'NOT SET')[:10] + '...')"
-```
-
-### 8.2 P1-3-15：实现 WebSocket 推送接口
-
-**目的**：前端通过 WebSocket 接收实时事件流。
-
-**实现路径**：
-
-- `src/cognizes/engine/api/main.py` - FastAPI 应用入口
-- `src/cognizes/engine/pulse/pg_notify_listener.py` - NOTIFY 监听器
-
-#### 8.2.1 启动服务
-
-```bash
-# 终端 1：启动 FastAPI 服务
+# 终端 1：启动 FastAPI 服务 (Start the Heartbeat Monitor)
 uv run uvicorn cognizes.engine.api.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-预期输出：
+**预期生命体征**：
 
-```
+```log
 INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
-INFO:     ✓ PgNotifyListener started
+INFO:     ✓ PgNotifyListener started  <-- 监听器启动，脉搏开始传导
 ```
 
-#### 8.2.2 验证健康检查
+#### 5.1.2 基础反射测试 (Health Check)
 
 ```bash
-# 终端 2：验证服务状态
+# 终端 2：测试膝跳反射 (Health Endpoint)
 curl http://localhost:8000/health
 ```
 
-预期输出：
+**预期反应**：
 
 ```json
 { "status": "ok", "listener_running": true }
 ```
 
-#### 8.2.3 验证 WebSocket 连接
+---
 
-```bash
-# 方式 1：使用 websocat 工具 (需安装: brew install websocat)
-websocat ws://localhost:8000/ws/events/test-thread
+### 5.2 Step 2: 器官功能测试 (Organ Function Test)
 
-# 方式 2：使用 Python 脚本
-uv run python -c "
-import asyncio
-import websockets
-async def test():
-    async with websockets.connect('ws://localhost:8000/ws/events/test-thread') as ws:
-        print('✓ WebSocket connected')
-        msg = await asyncio.wait_for(ws.recv(), timeout=30)
-        print(f'Received: {msg}')
-asyncio.run(test())
-"
-```
-
-#### 8.2.4 触发测试事件
-
-```bash
-# 终端 3：发送测试 NOTIFY 消息
-curl http://localhost:8000/api/test-notify
-```
-
-预期输出：
-
-```json
-{ "status": "sent", "payload": "{\"thread_id\":\"test-thread\",...}" }
-```
-
-WebSocket 客户端应立即收到事件。
-
-#### 8.2.5 验证延迟
-
-```bash
-# 使用集成测试验证延迟 < 50ms
-uv run pytest tests/integration/pulse/test_notify_latency.py -v -s
-```
-
-**验收标准**：
-
-- [ ] 服务启动成功，listener_running 为 true
-- [ ] 前端可通过 `ws://localhost:8000/ws/events/{thread_id}` 连接
-- [ ] 收到 NOTIFY 事件后延迟 < 100ms
-
-### 8.3 P1-5-3：实现 SSE 事件流端点
-
-**目的**：通过 Server-Sent Events 推送 AG-UI 事件流。
-
-**实现路径**：
-
-- `src/cognizes/engine/api/main.py` - SSE 端点 `/api/runs/{run_id}/events`
-- `src/cognizes/engine/pulse/event_bridge.py` - AG-UI 事件类型定义
-
-#### 8.3.1 验证服务已启动
-
-确保 FastAPI 服务正在运行（见 8.2.1）。
-
-#### 8.3.2 验证 SSE 连接
-
-```bash
-# 终端 1：订阅 SSE 事件流 (使用 curl -N 保持长连接)
-curl -N http://localhost:8000/api/runs/test-run/events
-```
-
-预期输出（立即收到连接事件）：
-
-```
-data: {"type":"CUSTOM","runId":"test-run","timestamp":...,"name":"connected","message":"SSE stream for run_id=test-run"}
-```
-
-#### 8.3.3 验证事件推送
-
-```bash
-# 终端 2：触发 SSE 测试事件
-curl http://localhost:8000/api/test-sse-notify/test-run
-```
-
-预期输出：
-
-```json
-{ "status": "sent", "run_id": "test-run", "payload": "..." }
-```
-
-同时，终端 1 的 SSE 客户端应收到：
-
-```
-data: {"type":"RAW","runId":"test-run","timestamp":...,"payload":{...}}
-
-```
-
-#### 8.3.4 验证响应头
-
-```bash
-# 验证 Content-Type (使用 -D - 打印响应头，而非 -I)
-curl -s -D - http://localhost:8000/api/runs/test-run/events 2>&1 | head -10
-```
-
-预期输出：
-
-```
-HTTP/1.1 200 OK
-...
-content-type: text/event-stream; charset=utf-8
-```
-
-> [!NOTE]
+> **Objective**: 验证核心器官 (`StateManager`) 的收缩与舒张逻辑是否准确。
 >
-> 使用 `curl -I` 会发送 `HEAD` 请求，SSE 端点不支持 HEAD，会返回 `405 Method Not Allowed`。
+> **Note**: 虽然归类为 Unit Test，但为了确保原子性与 OCC 机制的真实可靠性，以下测试会连接真实数据库进行验证。
 
-#### 8.3.5 验证心跳机制
+**测试范围**：
 
-保持 SSE 连接 30 秒不发送事件，客户端应收到心跳：
+- **State Transitions**: 状态能否正确更新、合并。
+- **Logic Validity**: 前缀作用域解析 (`user:`, `app:`) 是否精准。
+- **Atomic Transaction**: 确保 `Event` 追加与 `State` 更新在同一事务中提交。
 
+```bash
+# 1. 全面器官检查 (44 个测试用例)
+uv run pytest tests/unittests/pulse/ -v
+
+# 2. 核心瓣膜专项检查 (StateManager Focus)
+# 包含 Session CRUD, OCC 冲突检测, 原子性验证
+uv run pytest tests/unittests/pulse/test_state_manager.py -v --tb=short
 ```
-data: {"type":"CUSTOM","runId":"test-run","timestamp":...,"name":"heartbeat"}
-
-```
-
-**验收标准**：
-
-- [ ] 响应 Content-Type 为 `text/event-stream`
-- [ ] 事件格式符合 SSE 规范 (`data: {...}\n\n`)
-- [ ] 首事件延迟 < 100ms（连接事件立即返回）
-- [ ] 心跳每 30 秒发送一次
 
 ---
 
-## 参考文献
+### 5.3 Step 3: 全身循环测试 (Systemic Circulation Test)
+
+> **Objective**: 验证血液（事件）能否从心脏（DB）泵出，经由动脉（EventBridge），最终到达末梢神经（UI Client）。这对应于 **Integration & E2E Testing**。
+
+#### 5.3.1 经络通路测试 (WebSocket)
+
+验证前端能否通过 WebSocket 建立长连接。
+
+```bash
+# 使用 websocat 探针 (需安装: brew install websocat)
+websocat ws://localhost:8000/ws/events/test-thread
+```
+
+#### 5.3.2 脉搏传导测试 (Notify -> Client)
+
+验证 "数据库插入 -> 触发 Notify -> 推送 WebSocket" 的完整反射弧。
+
+```bash
+# 终端 3: 注入刺激信号 (Trigger Test Event)
+curl http://localhost:8000/api/test-notify
+```
+
+**预期反应**：WebSocket 客户端应在 **< 100ms** 内“抽动”一下（收到 JSON 数据）。
+
+#### 5.3.3 微循环测试 (SSE Stream)
+
+验证 SSE (Server-Sent Events) 单向高频流的稳定性，模拟 Run 执行过程中的 Token 流输出。
+
+```bash
+# 终端 1: 接入微循环监测仪 (Listen to SSE)
+curl -N http://localhost:8000/api/runs/test-run/events
+
+# 终端 2: 注入造影剂 (Trigger SSE Event)
+curl http://localhost:8000/api/test-sse-notify/test-run
+```
+
+**预期反应**：
+
+1.  **连接时**：立即收到 `connected` 事件。
+2.  **注入后**：立即流出 `RAW` 事件 payload。
+3.  **静置后**：每 30 秒收到有力的一次 `heartbeat` 跳动。
+
+---
+
+### 5.4 Step 4: 心脏负荷测试 (Cardiac Stress Test)
+
+> **Objective**: 在高压从下，验证心脏能否维持 50ms 以内的泵血延迟，且不发生心室颤动（数据竞争/丢失）。这对应于 **Performance Testing**。
+
+**关键指标 (Vital Signs Target)**：
+
+- **Systolic Latency (收缩延迟)**: End-to-End < 50ms
+- **Cardiac Output (心输出量)**: > 100 msg/s throughput
+- **Rhythm Stability (节律稳定性)**: 并发写入无冲突丢失 (OCC Effective)
+
+```bash
+# 1. 延迟与吞吐量专项测试 (Latency Check)
+# 覆盖: test_end_to_end_latency (<50ms), test_100_msg_per_second_throughput
+uv run pytest tests/integration/pulse/test_notify_latency.py -v -s
+
+# 2. 并发压力测试 (Stress Test)
+# 模拟 10 个 Agent 同时并发写入同一 Session，验证 OCC 乐观锁机制 (Zero Data Loss)
+# 覆盖: test_10_concurrent_writes_no_data_loss, test_100_qps_session_creation
+uv run pytest tests/unittests/pulse/test_state_manager.py -v -s -k "Concurrency or Performance"
+```
+
+**验收标准 (Discharge Criteria)**：
+
+| 指标           | 目标        | 验证用例 (Verified in Tests)                                              |
+| :------------- | :---------- | :------------------------------------------------------------------------ |
+| **Reflex**     | < 50ms      | `integration/test_notify_latency.py::test_end_to_end_latency`             |
+| **Throughput** | > 100 msg/s | `integration/test_notify_latency.py::test_100_msg_per_second_throughput`  |
+| **Endurance**  | 100 QPS     | `unittests/test_state_manager.py::test_100_qps_session_creation`          |
+| **Rhythm**     | 0 Loss      | `unittests/test_state_manager.py::test_10_concurrent_writes_no_data_loss` |
+
+---
+
+## 6. 验收基准 (出院评估, Discharge Summary)
+
+### 6.1 功能验收矩阵
+
+> **对标任务**: [001-task-checklist.md](./001-task-checklist.md)
+
+| Category        | Indicator (验收项)    | Target (目标值)                | Verification Method (验证方法)           |
+| :-------------- | :-------------------- | :----------------------------- | :--------------------------------------- |
+| **Anatomy**     | **Schema Integrity**  | 7 Tables + 2 Triggers          | `\dt` (Tables) + `\df` (Triggers)        |
+| **Physiology**  | **Atomic State**      | 0 Dirty Reads / Lost Updates   | `test_state_manager.py` (Unit/DB)        |
+|                 | **OCC Resilience**    | 100% Concurrent Write Success  | `test_10_concurrent_writes_no_data_loss` |
+| **Circulation** | **Systolic Latency**  | P99 < 50ms                     | `test_end_to_end_latency`                |
+|                 | **Stream Continuity** | 100% Delivery (No Loss)        | `test_100_msg_per_second_throughput`     |
+| **Neurology**   | **Event Integration** | 6 Event Types Correctly Mapped | `test_event_bridge.py`                   |
+|                 | **SSE Reflex**        | Response < 100ms               | `test_event_bridge_e2e.py`               |
+
+### 6.2 Stress Test Limits (负荷极限)
+
+> **Objective**: 确立系统的安全运行边界 (Operational Boundaries)。
+
+| Metric                | Threshold | Condition                  | Corresponding Test                          |
+| :-------------------- | :-------- | :------------------------- | :------------------------------------------ |
+| **Session Gen Rate**  | > 100 QPS | Single Node, Empty State   | `test_100_qps_session_creation`             |
+| **Event Pulse Rate**  | > 500 QPS | Single Node, Small Payload | `test_append_event_with_state_delta` (Est.) |
+| **Notification Lag**  | < 50 ms   | @ 100 msg/s                | `test_end_to_end_latency`                   |
+| **Write Concurrency** | 10 Agents | Same Session, No Data Loss | `test_multi_agent_concurrency`              |
+| **Stream Latency**    | < 100 ms  | Event -> SSE Client        | `test_sse_reflex` (E2E)                     |
+
+### 6.3. 交付物清单 (Deliverables)
+
+| Category        | File Path                                          | Description                     | Task ID |
+| :-------------- | :------------------------------------------------- | :------------------------------ | :------ |
+| **Theory**      | `docs/010-the-pulse.md`                            | 本实施方案与 SOP                | P1-4-1  |
+| **Blueprint**   | `src/cognizes/engine/schema/agent_schema.sql`      | 统一建表脚本 (7 表 + 2 触发器)  | P1-2-12 |
+| **Organs**      | `src/cognizes/engine/pulse/state_manager.py`       | StateManager (Heart)            | P1-4-2  |
+|                 | `src/cognizes/engine/pulse/pg_notify_listener.py`  | Notify Listener (Pulse Node)    | P1-3-14 |
+|                 | `src/cognizes/engine/pulse/event_bridge.py`        | Event Bridge (Translator)       | P1-5-1  |
+|                 | `src/cognizes/engine/pulse/state_debug.py`         | Debug Service (Monitor)         | P1-5-4  |
+|                 | `src/cognizes/engine/api/main.py`                  | FastAPI Entry (Gateway)         | P1-3-15 |
+| **Diagnostics** | **Type: Unit / Logic**                             |                                 |         |
+|                 | `tests/unittests/pulse/test_state_manager.py`      | Session CRUD, OCC, Concurrency  | P1-4-3  |
+|                 | `tests/unittests/pulse/test_pg_notify_listener.py` | Listener Logic                  | P1-3-15 |
+|                 | `tests/unittests/pulse/test_event_bridge.py`       | Event Mapping & Schema          | P1-5-2  |
+|                 | **Type: Integration / Systemic**                   |                                 |         |
+|                 | `tests/integration/pulse/test_state_manager_db.py` | Full DB Transactions            | P1-4-4  |
+|                 | `tests/integration/pulse/test_notify_latency.py`   | End-to-End Latency & Throughput | P1-3-16 |
+|                 | `tests/integration/pulse/test_event_bridge_e2e.py` | SSE Stream Verification         | P1-5-3  |
+|                 | `tests/integration/pulse/test_state_debug_db.py`   | State History Query             | P1-5-6  |
+
+---
+
+## 7. 限制与未来规划
+
+> [!WARNING]
+>
+> **Phase 1 工程边界**：以下限制是当前架构设计的已知约束，将在后续 Phase 2 中优化。
+
+| 组件/领域      | 限制描述                         | 影响评估                       | Phase 2 优化方向                          |
+| :------------- | :------------------------------- | :----------------------------- | :---------------------------------------- |
+| **PostgreSQL** | `NOTIFY` payload 最大 8000 bytes | 大消息可能被截断，需走回查机制 | 引入 Redis Pub/Sub 或 Hybrid Hybrid Queue |
+| **pg_cron**    | 调度精度最小 1 分钟              | 无法支持秒级定时任务           | 引入专用 Job Scheduler (如 Temporal)      |
+| **State**      | JSONB 整体读写                   | 状态过大时（>1MB）性能下降     | 引入 `jsonb_set` 局部更新或拆表存储       |
+| **Throughput** | 单节点 DB 瓶颈                   | 预估上限 ~5k TPS               | 引入 Read Replica 或 Sharding             |
+
+---
+
+## 8. 参考文献
 
 <a id="ref1"></a>1. Google. (2025). _ADK Sessions Documentation_. [https://google.github.io/adk-docs/sessions/](https://google.github.io/adk-docs/sessions/)
 

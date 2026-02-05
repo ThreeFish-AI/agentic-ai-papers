@@ -40,17 +40,24 @@ class PgNotifyListener:
     - 回调处理
     """
 
-    def __init__(self, dsn: str, channels: list[str] | None = None):
+    def __init__(self, dsn: str | None = None, channels: list[str] | None = None):
         self.dsn = dsn
         self.channels = channels or ["event_stream"]
         self._connection: asyncpg.Connection | None = None
+        self._pool = None  # 保存连接池引用以便释放连接
         self._listeners: dict[str, list[Callable]] = {}
         self._running = False
 
     async def start(self) -> None:
         """启动监听器"""
+        from cognizes.core.database import DatabaseManager
+
         self._running = True
-        self._connection = await asyncpg.connect(self.dsn)
+
+        # 统一使用 DatabaseManager 获取连接
+        db = DatabaseManager.get_instance(dsn=self.dsn)
+        self._pool = await db.get_pool()
+        self._connection = await self._pool.acquire()
 
         for channel in self.channels:
             await self._connection.add_listener(channel, self._handle_notification)
@@ -62,8 +69,11 @@ class PgNotifyListener:
         if self._connection:
             for channel in self.channels:
                 await self._connection.remove_listener(channel, self._handle_notification)
-            await self._connection.close()
+            # 通过连接池释放连接
+            if self._pool:
+                await self._pool.release(self._connection)
             self._connection = None
+            self._pool = None
 
     def on_event(self, channel: str, callback: Callable[[NotifyEvent], Coroutine[Any, Any, None]]) -> None:
         """注册事件回调"""
@@ -102,7 +112,7 @@ async def create_websocket_endpoint():
     from fastapi import FastAPI, WebSocket
 
     app = FastAPI()
-    listener = PgNotifyListener(dsn="postgresql://user:pass@localhost/agent_db")
+    listener = PgNotifyListener(dsn="postgresql://aigc:@localhost/cognizes-engine")
 
     @app.on_event("startup")
     async def startup():

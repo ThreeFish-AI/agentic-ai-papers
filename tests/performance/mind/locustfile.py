@@ -58,14 +58,10 @@ def get_event_loop():
 
 async def init_db_pool(host: str):
     """初始化数据库连接池"""
-    import asyncpg
+    from cognizes.core.database import DatabaseManager
 
-    return await asyncpg.create_pool(
-        dsn=host,
-        min_size=5,
-        max_size=50,
-        command_timeout=30,
-    )
+    db = DatabaseManager.get_instance(dsn=host)
+    return await db.get_pool()
 
 
 @events.init.add_listener

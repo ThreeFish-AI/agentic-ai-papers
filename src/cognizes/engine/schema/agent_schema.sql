@@ -15,9 +15,13 @@ CREATE TABLE IF NOT EXISTS threads (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     app_name        VARCHAR(255) NOT NULL,
     user_id         VARCHAR(255) NOT NULL,
+    -- 会话状态 (无前缀作用域)
     state           JSONB NOT NULL DEFAULT '{}',
+    -- 乐观锁版本号 (OCC)
     version         INTEGER NOT NULL DEFAULT 1,
+    -- 元数据
     metadata        JSONB DEFAULT '{}',
+    -- 时间戳
     created_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     CONSTRAINT threads_app_user_unique UNIQUE (app_name, user_id, id)
@@ -33,11 +37,15 @@ CREATE TABLE IF NOT EXISTS events (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     thread_id       UUID NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
     invocation_id   UUID NOT NULL,
-    author          VARCHAR(50) NOT NULL,
-    event_type      VARCHAR(50) NOT NULL,
+    author          VARCHAR(50) NOT NULL,   -- 'user', 'agent', 'tool'
+    event_type      VARCHAR(50) NOT NULL,   -- 'message', 'tool_call', 'state_update'
+    -- 事件内容
     content         JSONB NOT NULL DEFAULT '{}',
+    -- 事件动作 (state_delta, tool_calls 等)
     actions         JSONB DEFAULT '{}',
+    -- 时间戳
     created_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    -- 序列号 (用于排序)
     sequence_num    BIGSERIAL
 );
 
@@ -51,11 +59,15 @@ CREATE INDEX IF NOT EXISTS idx_events_sequence ON events(thread_id, sequence_num
 CREATE TABLE IF NOT EXISTS runs (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     thread_id       UUID NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+    -- 执行状态
     status          VARCHAR(20) NOT NULL DEFAULT 'pending',
+    -- 思考步骤 (用于可观测性)
     -- CHECK (status IN ('pending', 'running', 'completed', 'failed', 'cancelled'))
     thinking_steps  JSONB DEFAULT '[]',
     tool_calls      JSONB DEFAULT '[]',  -- 工具调用记录
+    -- 错误信息
     error           TEXT,
+    -- 时间戳
     started_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     completed_at    TIMESTAMP WITH TIME ZONE
 );
@@ -70,19 +82,14 @@ CREATE TABLE IF NOT EXISTS messages (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     thread_id       UUID NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
     event_id        UUID REFERENCES events(id) ON DELETE SET NULL,
-
     -- 消息元数据
     role            VARCHAR(20) NOT NULL,  -- 'user', 'assistant', 'tool', 'system'
-
     -- 消息内容
     content         TEXT NOT NULL,
-
     -- 向量嵌入 (Phase 2 将使用)
     embedding       vector(1536),  -- OpenAI text-embedding-3-small / Gemini embedding
-
     -- 元数据
     metadata        JSONB DEFAULT '{}',
-
     -- 时间戳
     created_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
@@ -99,19 +106,14 @@ CREATE INDEX IF NOT EXISTS idx_messages_role ON messages(role);
 CREATE TABLE IF NOT EXISTS snapshots (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     thread_id       UUID NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
-
     -- 快照版本 (与 threads.version 对应)
     version         INTEGER NOT NULL,
-
     -- 状态快照
     state           JSONB NOT NULL,
-
     -- 事件摘要 (可选，用于快速恢复)
     events_summary  JSONB DEFAULT '{}',
-
     -- 时间戳
     created_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-
     -- 每个 thread 的每个 version 只有一个快照
     CONSTRAINT snapshots_thread_version_unique UNIQUE (thread_id, version)
 );

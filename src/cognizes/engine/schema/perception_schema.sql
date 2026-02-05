@@ -6,12 +6,12 @@
 -- ============================================
 --
 -- 本脚本包含 Phase 3 Perception 的所有数据库对象：
---   Part 1: Knowledge Base Schema (corpus + knowledge_base 表)
+--   Part 1: Knowledge Base Schema (corpus + knowledge 表)
 --   Part 2: Memory Schema 扩展 (search_vector 列 + 触发器)
 --   Part 3: JSONB Complex Predicates 索引
 --   Part 4: Hybrid Search 函数 (用于 memories 表)
 --   Part 5: RRF Search 函数 (用于 memories 表)
---   Part 6: Knowledge Base Hybrid Search 函数 (用于 knowledge_base 表)
+--   Part 6: Knowledge Base Hybrid Search 函数 (用于 knowledge 表)
 --   Part 7: 验证脚本
 --
 -- ============================================
@@ -38,8 +38,8 @@ CREATE INDEX IF NOT EXISTS idx_corpus_app_name ON corpus(app_name);
 
 COMMENT ON TABLE corpus IS '语料库管理表，用于管理 Knowledge Base 的顶层容器';
 
--- 1.2 Knowledge Base 表 (知识块存储)
-CREATE TABLE IF NOT EXISTS knowledge_base (
+-- 1.2 Knowledge 表 (知识块存储)
+CREATE TABLE IF NOT EXISTS knowledge (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     corpus_id UUID NOT NULL REFERENCES corpus(id) ON DELETE CASCADE,
     app_name VARCHAR(255) NOT NULL,
@@ -64,20 +64,20 @@ CREATE TABLE IF NOT EXISTS knowledge_base (
 -- 1.3 Knowledge Base 索引
 -- 向量索引 (HNSW)
 CREATE INDEX IF NOT EXISTS idx_kb_embedding
-    ON knowledge_base USING hnsw (embedding vector_cosine_ops)
+    ON knowledge USING hnsw (embedding vector_cosine_ops)
     WITH (m = 16, ef_construction = 64);
 
 -- 全文索引 (GIN)
 CREATE INDEX IF NOT EXISTS idx_kb_search_vector
-    ON knowledge_base USING GIN (search_vector);
+    ON knowledge USING GIN (search_vector);
 
 -- 过滤索引
 CREATE INDEX IF NOT EXISTS idx_kb_corpus_app
-    ON knowledge_base(corpus_id, app_name);
+    ON knowledge(corpus_id, app_name);
 
 -- JSONB 元数据索引
 CREATE INDEX IF NOT EXISTS idx_kb_metadata_gin
-    ON knowledge_base USING GIN (metadata);
+    ON knowledge USING GIN (metadata);
 
 -- 1.4 Knowledge Base 触发器
 CREATE OR REPLACE FUNCTION kb_search_vector_trigger()
@@ -88,13 +88,13 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-DROP TRIGGER IF EXISTS trigger_kb_search_vector ON knowledge_base;
+DROP TRIGGER IF EXISTS trigger_kb_search_vector ON knowledge;
 CREATE TRIGGER trigger_kb_search_vector
-    BEFORE INSERT OR UPDATE ON knowledge_base
+    BEFORE INSERT OR UPDATE ON knowledge
     FOR EACH ROW
     EXECUTE FUNCTION kb_search_vector_trigger();
 
-COMMENT ON TABLE knowledge_base IS '知识块存储表，用于 RAG Pipeline 的静态知识检索';
+COMMENT ON TABLE knowledge IS '知识块存储表，用于 RAG Pipeline 的静态知识检索';
 
 -- ================================
 -- Part 2: Memory Schema 扩展
@@ -145,6 +145,10 @@ CREATE INDEX IF NOT EXISTS idx_memories_metadata_gin
 -- 场景：频繁按 author.role 过滤
 CREATE INDEX IF NOT EXISTS idx_memories_author_role
     ON memories ((metadata->'author'->>'role'));
+
+-- 场景：频繁按 priority 范围过滤
+CREATE INDEX IF NOT EXISTS idx_memories_metadata_priority
+    ON memories (((metadata->>'priority')::int));
 
 -- ================================
 -- Part 4: Hybrid Search 函数 (用于 memories 表)
@@ -306,7 +310,7 @@ $$ LANGUAGE plpgsql;
 
 -- ================================
 -- Part 6: Knowledge Base Hybrid Search 函数
--- 用于 knowledge_base 表的混合检索
+-- 用于 knowledge 表的混合检索
 -- 任务 ID: P3-4-10
 -- ================================
 
@@ -337,7 +341,7 @@ BEGIN
             kb.id, kb.content, kb.source_uri,
             (1 - (kb.embedding <=> p_query_embedding))::REAL AS score,
             kb.metadata
-        FROM knowledge_base kb
+        FROM knowledge kb
         WHERE kb.corpus_id = p_corpus_id AND kb.app_name = p_app_name
         ORDER BY kb.embedding <=> p_query_embedding
         LIMIT p_limit * 2
@@ -348,7 +352,7 @@ BEGIN
             kb.id, kb.content, kb.source_uri,
             ts_rank_cd(kb.search_vector, plainto_tsquery('english', p_query))::REAL AS score,
             kb.metadata
-        FROM knowledge_base kb
+        FROM knowledge kb
         WHERE kb.corpus_id = p_corpus_id
           AND kb.app_name = p_app_name
           AND kb.search_vector @@ plainto_tsquery('english', p_query)
@@ -389,14 +393,14 @@ $$ LANGUAGE plpgsql;
 -- 7.1 验证表结构
 SELECT table_name, column_name, data_type
 FROM information_schema.columns
-WHERE table_name IN ('corpus', 'knowledge_base', 'memories')
+WHERE table_name IN ('corpus', 'knowledge', 'memories')
   AND column_name IN ('embedding', 'search_vector', 'metadata', 'corpus_id')
 ORDER BY table_name, ordinal_position;
 
 -- 7.2 验证索引
 SELECT tablename, indexname, indexdef
 FROM pg_indexes
-WHERE tablename IN ('corpus', 'knowledge_base', 'memories')
+WHERE tablename IN ('corpus', 'knowledge', 'memories')
 ORDER BY tablename, indexname;
 
 -- 7.3 验证函数
@@ -414,5 +418,5 @@ WHERE proname IN (
 SELECT tgname, relname
 FROM pg_trigger t
 JOIN pg_class c ON t.tgrelid = c.oid
-WHERE relname IN ('memories', 'knowledge_base')
+WHERE relname IN ('memories', 'knowledge')
   AND tgname LIKE 'trigger_%';

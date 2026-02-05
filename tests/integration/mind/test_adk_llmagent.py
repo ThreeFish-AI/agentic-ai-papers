@@ -18,7 +18,7 @@ async def run_agent_with_postgres():
     # 1. 初始化 PostgreSQL 服务
     import asyncpg
 
-    pool = await asyncpg.create_pool("postgresql://aigc:@localhost/cognizes-engine")
+    pool = await asyncpg.create_pool("postgresql://user:pass@localhost/agent_db")
 
     session_service = PostgresSessionService(pool=pool)
     memory_service = PostgresMemoryService(pool=pool)

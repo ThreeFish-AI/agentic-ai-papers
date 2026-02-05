@@ -12,6 +12,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
 from cognizes.engine.pulse.pg_notify_listener import PgNotifyListener, NotifyEvent
+from cognizes.core.database import DatabaseManager
 
 # 配置日志
 logging.basicConfig(level=logging.INFO)
@@ -101,24 +102,20 @@ async def test_notify():
 
     用于验证 WebSocket 推送链路
     """
-    import asyncpg
     import json
     from datetime import datetime
 
-    conn = await asyncpg.connect(DB_DSN)
-    try:
-        payload = json.dumps(
-            {
-                "thread_id": "test-thread",
-                "event_type": "test",
-                "message": "Hello from test-notify!",
-                "timestamp": datetime.now().isoformat(),
-            }
-        )
-        await conn.execute(f"NOTIFY event_stream, '{payload}'")
-        return {"status": "sent", "payload": payload}
-    finally:
-        await conn.close()
+    db = DatabaseManager.get_instance()
+    payload = json.dumps(
+        {
+            "thread_id": "test-thread",
+            "event_type": "test",
+            "message": "Hello from test-notify!",
+            "timestamp": datetime.now().isoformat(),
+        }
+    )
+    await db.execute(f"NOTIFY event_stream, '{payload}'")
+    return {"status": "sent", "payload": payload}
 
 
 @app.get("/api/runs/{run_id}/events")
@@ -191,30 +188,26 @@ async def test_sse_notify(run_id: str):
 
     用于验证 SSE 推送链路
     """
-    import asyncpg
     import json
     from datetime import datetime
 
-    conn = await asyncpg.connect(DB_DSN)
-    try:
-        payload = json.dumps(
-            {
+    db = DatabaseManager.get_instance()
+    payload = json.dumps(
+        {
+            "run_id": run_id,
+            "table": "events",
+            "operation": "INSERT",
+            "data": {
+                "id": f"evt-{run_id}",
                 "run_id": run_id,
-                "table": "events",
-                "operation": "INSERT",
-                "data": {
-                    "id": f"evt-{run_id}",
-                    "run_id": run_id,
-                    "event_type": "message",
-                    "content": {"text": f"Hello from SSE test for {run_id}!"},
-                },
-                "timestamp": datetime.now().isoformat(),
-            }
-        )
-        await conn.execute(f"NOTIFY event_stream, '{payload}'")
-        return {"status": "sent", "run_id": run_id, "payload": payload}
-    finally:
-        await conn.close()
+                "event_type": "message",
+                "content": {"text": f"Hello from SSE test for {run_id}!"},
+            },
+            "timestamp": datetime.now().isoformat(),
+        }
+    )
+    await db.execute(f"NOTIFY event_stream, '{payload}'")
+    return {"status": "sent", "run_id": run_id, "payload": payload}
 
 
 if __name__ == "__main__":

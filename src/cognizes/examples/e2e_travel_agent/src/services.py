@@ -2,7 +2,6 @@
 服务工厂：根据配置创建对应的 Session/Memory 服务实例
 """
 
-import asyncpg
 from config import config, BackendType
 
 # Google 托管服务（基线）
@@ -13,34 +12,13 @@ from google.adk.memory import InMemoryMemoryService
 from cognizes.adapters.postgres.session_service import PostgresSessionService
 from cognizes.adapters.postgres.memory_service import PostgresMemoryService
 from cognizes.adapters.postgres.tracing import TracingManager
-
-# 全局连接池和其关联的事件循环
-_pool = None
-_pool_loop = None
+from cognizes.core.database import DatabaseManager
 
 
-async def get_db_pool() -> asyncpg.Pool:
-    """获取数据库连接池 - 确保在正确的事件循环中创建"""
-    global _pool, _pool_loop
-    import asyncio
-    import pgvector.asyncpg
-
-    current_loop = asyncio.get_running_loop()
-
-    async def init_connection(conn):
-        await pgvector.asyncpg.register_vector(conn)
-
-    # 如果连接池不存在，或者是在不同的事件循环中创建的，则重新创建
-    if _pool is None or _pool_loop is not current_loop:
-        if _pool is not None:
-            try:
-                await _pool.close()
-            except Exception:
-                pass  # 忽略关闭错误，因为旧事件循环可能已经关闭
-
-        _pool = await asyncpg.create_pool(config.database_url, min_size=2, max_size=10, init=init_connection)
-        _pool_loop = current_loop
-    return _pool
+async def get_db_pool():
+    """获取数据库连接池 - 通过 DatabaseManager 统一管理"""
+    db = DatabaseManager.get_instance(dsn=config.database_url)
+    return await db.get_pool()
 
 
 async def embed_text(text: str) -> list[float]:

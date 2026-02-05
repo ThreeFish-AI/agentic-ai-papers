@@ -24,6 +24,8 @@ from typing import Any
 import asyncpg
 import google.generativeai as genai
 
+from cognizes.core.database import DatabaseManager
+
 # ========================================
 # 数据类型定义
 # ========================================
@@ -159,11 +161,11 @@ class MemoryConsolidationWorker:
 
     def __init__(
         self,
-        pool: asyncpg.Pool,
+        db: DatabaseManager,
         model_name: str = "gemini-2.0-flash",
         embedding_model: str = "text-embedding-004",
     ):
-        self.pool = pool
+        self.db = db
         self.model_name = model_name
         self.embedding_model = embedding_model
         self.model = genai.GenerativeModel(model_name)
@@ -274,6 +276,7 @@ class MemoryConsolidationWorker:
             # 任务完成
             job.result = result
             job.completed_at = datetime.now()
+            job.status = JobStatus.COMPLETED
             await self._update_job_status(job.id, JobStatus.COMPLETED, result)
 
             return job
@@ -295,17 +298,7 @@ class MemoryConsolidationWorker:
         limit: int = 50,
     ) -> list[dict[str, Any]]:
         """提取最近的事件"""
-        query = """
-            SELECT id, author, event_type, content, created_at
-            FROM events
-            WHERE thread_id = $1
-            ORDER BY sequence_num DESC
-            LIMIT $2
-        """
-        async with self.pool.acquire() as conn:
-            rows = await conn.fetch(query, uuid.UUID(thread_id), limit)
-            # 反转顺序使其按时间正序
-            return [dict(row) for row in reversed(rows)]
+        return await self.db.events.get_recent_events(uuid.UUID(thread_id), limit)
 
     def _format_conversation(self, events: list[dict[str, Any]]) -> str:
         """格式化对话历史"""
@@ -349,23 +342,15 @@ class MemoryConsolidationWorker:
 
         memory_id = str(uuid.uuid4())
 
-        query = """
-            INSERT INTO memories (id, thread_id, user_id, app_name, memory_type, content, embedding, metadata)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-            RETURNING id, created_at
-        """
-        async with self.pool.acquire() as conn:
-            await conn.execute(
-                query,
-                uuid.UUID(memory_id),
-                uuid.UUID(thread_id),
-                user_id,
-                app_name,
-                "summary",
-                content,
-                embedding,
-                json.dumps({"source": "fast_replay"}),
-            )
+        await self.db.memories.insert(
+            thread_id=uuid.UUID(thread_id),
+            user_id=user_id,
+            app_name=app_name,
+            memory_type="summary",
+            content=content,
+            embedding=embedding,
+            metadata={"source": "fast_replay"},
+        )
 
         return Memory(
             id=memory_id,
@@ -420,34 +405,20 @@ class MemoryConsolidationWorker:
         embedding = await self._generate_embedding(content_for_embedding)
 
         # Upsert: 如果已存在相同 key 则更新
-        query = """
-            INSERT INTO facts (id, thread_id, user_id, app_name, fact_type, key, value, embedding, confidence)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-            ON CONFLICT (user_id, app_name, fact_type, key)
-            DO UPDATE SET
-                value = EXCLUDED.value,
-                embedding = EXCLUDED.embedding,
-                confidence = EXCLUDED.confidence,
-                thread_id = EXCLUDED.thread_id
-            RETURNING id
-        """
-        async with self.pool.acquire() as conn:
-            result = await conn.fetchrow(
-                query,
-                uuid.UUID(fact_id),
-                uuid.UUID(thread_id),
-                user_id,
-                app_name,
-                fact_type,
-                key,
-                json.dumps(value),
-                embedding,
-                confidence,
-            )
-            actual_id = str(result["id"])
+        # Upsert: 如果已存在相同 key 则更新
+        fact_db_id = await self.db.facts.upsert(
+            user_id=user_id,
+            app_name=app_name,
+            fact_type=fact_type,
+            key=key,
+            value=value,
+            embedding=embedding,
+            confidence=confidence,
+            thread_id=uuid.UUID(thread_id),
+        )
 
         return Fact(
-            id=actual_id,
+            id=str(fact_db_id),
             thread_id=thread_id,
             user_id=user_id,
             app_name=app_name,
@@ -480,24 +451,16 @@ class MemoryConsolidationWorker:
 
         memory_id = str(uuid.uuid4())
 
-        query = """
-            INSERT INTO memories (id, thread_id, user_id, app_name, memory_type, content, embedding, metadata, retention_score)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-            RETURNING id
-        """
-        async with self.pool.acquire() as conn:
-            await conn.execute(
-                query,
-                uuid.UUID(memory_id),
-                uuid.UUID(thread_id),
-                user_id,
-                app_name,
-                "semantic",
-                content,
-                embedding,
-                json.dumps({"source": "deep_reflection", "importance": importance}),
-                retention_score,
-            )
+        await self.db.memories.insert(
+            thread_id=uuid.UUID(thread_id),
+            user_id=user_id,
+            app_name=app_name,
+            memory_type="semantic",
+            content=content,
+            embedding=embedding,
+            metadata={"source": "deep_reflection", "importance": importance},
+            retention_score=retention_score,
+        )
 
         return Memory(
             id=memory_id,
@@ -536,7 +499,7 @@ class MemoryConsolidationWorker:
             VALUES ($1, $2, $3, $4, NOW())
             RETURNING created_at
         """
-        async with self.pool.acquire() as conn:
+        async with self.db.acquire() as conn:
             result = await conn.fetchrow(
                 query,
                 uuid.UUID(job_id),
@@ -563,14 +526,14 @@ class MemoryConsolidationWorker:
         """更新任务状态"""
         query = """
             UPDATE consolidation_jobs
-            SET status = $2,
-                result = COALESCE($3, result),
-                error = COALESCE($4, error),
-                started_at = CASE WHEN $2 = 'running' THEN NOW() ELSE started_at END,
-                completed_at = CASE WHEN $2 IN ('completed', 'failed') THEN NOW() ELSE completed_at END
-            WHERE id = $1
+            SET status = $2::varchar,
+                result = COALESCE($3::jsonb, result),
+                error = COALESCE($4::text, error),
+                started_at = CASE WHEN $2::varchar = 'running' THEN NOW() ELSE started_at END,
+                completed_at = CASE WHEN $2::varchar IN ('completed', 'failed') THEN NOW() ELSE completed_at END
+            WHERE id = $1::uuid
         """
-        async with self.pool.acquire() as conn:
+        async with self.db.acquire() as conn:
             await conn.execute(
                 query,
                 uuid.UUID(job_id),
@@ -586,23 +549,21 @@ class MemoryConsolidationWorker:
             FROM threads
             WHERE id = $1
         """
-        async with self.pool.acquire() as conn:
+        async with self.db.acquire() as conn:
             row = await conn.fetchrow(query, uuid.UUID(thread_id))
             return dict(row) if row else None
 
 
 # ========================================
-
 # 便捷函数
-
 # ========================================
 
 
 async def consolidate_thread(
-    pool: asyncpg.Pool,
+    db: DatabaseManager,
     thread_id: str,
     job_type: JobType = JobType.FULL_CONSOLIDATION,
 ) -> ConsolidationJob:
     """便捷函数：巩固指定会话的记忆"""
-    worker = MemoryConsolidationWorker(pool)
+    worker = MemoryConsolidationWorker(db)
     return await worker.consolidate(thread_id, job_type)

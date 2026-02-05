@@ -3,9 +3,10 @@
 """
 
 import asyncio
-import asyncpg
 import json
 from pathlib import Path
+
+from cognizes.core.database import DatabaseManager
 
 # 目的地测试数据
 DESTINATIONS_DATA = [
@@ -80,7 +81,7 @@ CREATE INDEX IF NOT EXISTS idx_user_preferences_user_id ON user_preferences(user
 """
 
 
-async def create_tables(pool: asyncpg.Pool):
+async def create_tables(pool):
     """创建 Demo 所需的表结构"""
     print("📦 Creating tables if not exist...")
     await pool.execute(DDL_DESTINATIONS)
@@ -88,7 +89,7 @@ async def create_tables(pool: asyncpg.Pool):
     print("  ✅ Tables created/verified")
 
 
-async def seed_destinations(pool: asyncpg.Pool):
+async def seed_destinations(pool):
     """插入目的地数据"""
     print("🌍 Seeding destinations...")
     for dest in DESTINATIONS_DATA:
@@ -110,7 +111,7 @@ async def seed_destinations(pool: asyncpg.Pool):
     print(f"  ✅ Inserted {len(DESTINATIONS_DATA)} destinations")
 
 
-async def seed_user_preferences(pool: asyncpg.Pool):
+async def seed_user_preferences(pool):
     """插入用户偏好数据"""
     print("👤 Seeding user preferences...")
     for pref in USER_PREFERENCES:
@@ -133,7 +134,8 @@ async def main():
     database_url = os.getenv("DATABASE_URL", "postgresql://aigc:@localhost:5432/cognizes-engine")
 
     print("🚀 Starting data seeding...")
-    pool = await asyncpg.create_pool(database_url)
+    db = DatabaseManager(dsn=database_url)
+    pool = await db.get_pool()
 
     try:
         await create_tables(pool)
@@ -141,7 +143,7 @@ async def main():
         await seed_user_preferences(pool)
         print("✅ Data seeding completed!")
     finally:
-        await pool.close()
+        await db.close()
 
 
 if __name__ == "__main__":
